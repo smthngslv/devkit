@@ -1,7 +1,10 @@
 # devkit
 
+<!-- template:start -->
 A template for a Python project: the coding rules, the tests that gate them, and the tooling configuration that
-enforces the rest. Copy it, rename the packages, and start writing code under the same rules as every other project.
+enforces the rest. Clone it, run `make init <name>`, and start writing code under the same rules as every other
+project.
+<!-- template:end -->
 
 ## Layout
 
@@ -14,7 +17,7 @@ Makefile                     # format, lint, test, install-hooks, bump-deps, bum
 pyproject.toml               # ruff, mypy, pyright (strict) and pytest configuration
 scripts/bump_deps.py         # raises the `>=` floors in pyproject.toml to the installed versions
 src/
-  devkit/                    # the package; empty in the template
+  devkit/                    # the package
   devkit_tests/
     conventions/             # the convention gates: parse every module and fail on a broken rule
 ```
@@ -31,15 +34,21 @@ make bump-deps               # upgrade every dependency and rewrite the floors i
 make bump VERSION=x.y.z      # set the project version and refresh the lockfile
 ```
 
+<!-- template:start -->
 ## Starting a project from this template
 
-1. Copy the repository and rename `src/devkit` and `src/devkit_tests` to `<package>` and `<package>_tests`.
-2. Replace `devkit` in `pyproject.toml`: `name`, `packages.find.include`, `per-file-ignores`, `known-first-party`
-   and `testpaths`.
-3. Replace `devkit` in `src/<package>_tests/conventions/source.py` (the two imports) and `devkit_tests` in the
-   `from devkit_tests.conventions import source` line of every gate.
-4. Replace `devkit_tests` in `.claude/CLAUDE.md` and `.claude/coding.md`.
-5. Run `uv sync` and `make format lint test`.
+```sh
+git clone <this repository> your_project
+cd your_project
+make init your_project
+```
+
+`scripts/init.py` turns the template into a project named `your_project`: it renames `src/devkit` and
+`src/devkit_tests`, rewrites every `devkit` reference in the rules, the configuration, the gates and this file,
+drops the template-only sections (this one, and the `init` section of the Makefile), removes itself, and runs
+`uv sync`. The name must be a package name: lowercase letters, digits and underscores. Nothing in git is
+touched, so review the result with `git status`, point `origin` at your own repository and commit.
+<!-- template:end -->
 
 ## The convention gates
 

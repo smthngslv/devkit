@@ -1,3 +1,16 @@
+###--INIT--#############################################################################################################
+
+# `make init <name>` turns the template into a project named <name>: renames the packages, rewrites every reference,
+# drops this section and the script, then syncs the environment.
+init:
+	uv run ./scripts/init.py $(filter-out $@,$(MAKECMDGOALS))
+
+# Lets the name after `init` pass as an argument instead of failing as an unknown target. Goes with the section.
+%:
+	@:
+
+########################################################################################################################
+
 ###--CODE--#############################################################################################################
 
 format:
