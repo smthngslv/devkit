@@ -1,0 +1,20 @@
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  - repo: local
+    hooks:
+      - id: project-checks
+        name: Format, lint, and test
+        entry: make format lint test
+        language: system
+        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [--strict]

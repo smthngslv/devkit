@@ -1,0 +1,46 @@
+{
+  "line_ending": "enforce_lf",
+  "format_on_save": "on",
+  "ensure_final_newline_on_save": true,
+  "remove_trailing_whitespace_on_save": true,
+  "lsp": {
+    "ruff": {
+      "binary": {
+        "path": ".venv/bin/ruff",
+        "arguments": ["server"],
+      },
+    },
+    "pyright": {
+      "binary": {
+        "path": ".venv/bin/pyright-langserver",
+        "arguments": ["--stdio"],
+      },
+    },
+    "pylsp": {
+      "binary": {
+        "path": ".venv/bin/pylsp",
+      },
+    },
+  },
+  "languages": {
+    "Python": {
+      "language_servers": ["ruff", "pyright", "pylsp"],
+      "semantic_tokens": "combined",
+      "inlay_hints": {
+        "enabled": true,
+        "show_type_hints": true,
+        "show_parameter_hints": true,
+        "show_other_hints": true,
+      },
+      "code_actions_on_format": {
+        "source.fixAll.ruff": true,
+        "source.organizeImports.ruff": true,
+      },
+      "formatter": {
+        "language_server": {
+          "name": "ruff",
+        },
+      },
+    },
+  },
+}
