@@ -12,12 +12,14 @@ project.
 AGENTS.md                    # agent instructions; points at the coding guide
 .pre-commit-config.yaml      # source checks and Conventional Commit validation
 docs/coding.md               # house style and conventions beyond standard tooling
+docs/tracing.md              # Logfire tracing, decorators, and context propagation
 .zed/settings.json           # Zed: ruff, pyright and pylsp from the project venv, format on save
 Makefile                     # format, lint, test, install-hooks, bump-deps, bump, version
 pyproject.toml               # ruff, mypy, pyright (strict) and pytest configuration
 scripts/bump_deps.py         # raises the `>=` floors in pyproject.toml to the installed versions
 src/
   devkit/                    # the package
+    tracing/                 # Logfire tracing helpers
   devkit_tests/
     conventions/             # the convention gates: parse every module and fail on a broken rule
 ```
@@ -53,6 +55,11 @@ drops the template-only sections (this one, and the `init` section of the Makefi
 `uv sync`. The name must be a package name: lowercase letters, digits and underscores. Nothing in git is
 touched, so review the result with `git status`, point `origin` at your own repository and commit.
 <!-- template:end -->
+
+## Tracing
+
+The package includes Logfire helpers for logs, spans, sync and async decorators, and portable trace contexts.
+See [docs/tracing.md](docs/tracing.md) for configuration, examples, and lifecycle behavior.
 
 ## The convention gates
 
