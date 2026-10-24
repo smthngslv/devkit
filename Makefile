@@ -30,11 +30,9 @@ test:
 
 ###--HOOKS--############################################################################################################
 
-# A pre-commit hook that runs the same checks a change is already required to pass, so a commit cannot skip them.
+# Install source checks and Conventional Commit validation from the shared configuration.
 install-hooks:
-	@printf '#!/bin/sh\nset -e\nmake lint test\n' > .git/hooks/pre-commit
-	@chmod +x .git/hooks/pre-commit
-	@echo "Installed .git/hooks/pre-commit."
+	uv run pre-commit install --install-hooks
 
 ########################################################################################################################
 

@@ -8,17 +8,19 @@ from devkit_tests.conventions import source
 
 __all__: Final[tuple[str, ...]] = ("test_no_module_level_name_is_double_underscored",)
 
-# `__all__` is the one module-level dunder a module is required to define (section 21).
+# `__all__` is the one module-level dunder a module is required to define.
 _PERMITTED: Final[frozenset[str]] = frozenset({"__all__"})
 
 
-# A module-level `__name` is not private the way a class-level one is. Mangling applies inside a class body
-# only, so at module scope the second underscore buys nothing over `_name` -- and it actively breaks: a
-# method that later references the module-level `__WINDOWS` compiles to `_Window__WINDOWS` and raises
-# `NameError` at runtime, under a name nobody typed. Nothing in ruff or pyright reports it, so this is the
-# gate (sections 7, 24).
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_no_module_level_name_is_double_underscored(path: pathlib.Path) -> None:
+    """Reject class-style private names at module scope.
+
+    Use `_cache`, not `__cache`, for a module-private name. Include bindings inside
+    conditional blocks and unpacking, but do not inspect class-local or function-local
+    names as module names. Ordinary dunders such as `__all__` remain allowed.
+    This avoids accidental name mangling when a class references a module variable.
+    """
     tree: Final[ast.Module] = source.parse(path)
     offenders: Final[list[str]] = [
         name

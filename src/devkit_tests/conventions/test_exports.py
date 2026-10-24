@@ -9,11 +9,14 @@ from devkit_tests.conventions import source
 __all__: Final[tuple[str, ...]] = ("test_every_module_declares_its_exports",)
 
 
-# Section 21 asks for `__all__` in every module, and prose alone does not survive a new file being added
-# (section 7). The one carve-out is a package marker with no statements: it declares nothing, so it has
-# nothing to declare.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_every_module_declares_its_exports(path: pathlib.Path) -> None:
+    """Require each nonempty module to declare its public exports.
+
+    An empty `__init__.py` is allowed; other modules need `__all__`, even when it
+    is an empty tuple. This check verifies the declaration exists, not that every
+    entry matches all consumers. Export correctness remains a review concern.
+    """
     tree: Final[ast.Module] = source.parse(path)
     if path.name == "__init__.py" and len(tree.body) == 0:
         return

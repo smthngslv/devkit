@@ -15,15 +15,19 @@ __all__: Final[tuple[str, ...]] = (
 )
 
 # Ruff's `dummy-variable-rgx`: a name that exists only because the syntax needs one carries no type worth
-# stating, and annotating it would be the only reason anyone read it (section 3 -- one spelling, here).
+# stating, and annotating it would be the only reason anyone read it (the shared definition -- one spelling, here).
 _DUMMY_NAME: Final[re.Pattern[str]] = re.compile(r"^_+$")
 
 
-# Section 14: a loop variable is annotated once per scope, before the loop. Nothing types it otherwise --
-# `ANN` covers parameters and returns, and a `for` target is neither -- so an untyped loop over an
-# untyped iterable is how `Any` gets into a function that looks fully annotated.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_loop_variables_are_annotated(path: pathlib.Path) -> None:
+    """Require a declared type for each named loop target.
+
+    For example, put `row: str` before `for row in rows`. Check sync and async
+    loops, including unpacked targets, without borrowing declarations from nested
+    functions. Ignore `_` placeholders and comprehensions, whose targets cannot
+    carry a separate annotation. This keeps the type visible at the binding.
+    """
     offenders: Final[list[str]] = []
     scope: source.Scope
     for scope in _get_scopes(source.parse(path)):
@@ -38,16 +42,18 @@ def test_loop_variables_are_annotated(path: pathlib.Path) -> None:
                 for name in _get_unannotated(node.target, declared=declared, row=node.lineno)
             )
 
-    assert offenders == [], (
-        f"{source.get_module_id(path)} loops over unannotated variables (section 14):\n" + "\n".join(offenders)
-    )
+    assert offenders == [], f"{source.get_module_id(path)} loops over unannotated variables:\n" + "\n".join(offenders)
 
 
-# Section 14 again, for the other binding a statement makes without a signature to carry the type. A
-# `with` target is what the context manager returns, which is exactly where the reader most wants the
-# type spelled out rather than inferred from a call three modules away.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_with_targets_are_annotated(path: pathlib.Path) -> None:
+    """Require a declared type for names bound by context managers.
+
+    For example, put `handle: IO[str]` before `with path.open() as handle`.
+    Check sync and async contexts and unpacked targets. A context without `as`
+    binds nothing and needs no declaration. The annotation explains what the
+    context manager returns without making the reader inspect its implementation.
+    """
     offenders: Final[list[str]] = []
     scope: source.Scope
     for scope in _get_scopes(source.parse(path)):
@@ -67,17 +73,18 @@ def test_with_targets_are_annotated(path: pathlib.Path) -> None:
                     for name in _get_unannotated(item.optional_vars, declared=declared, row=node.lineno)
                 )
 
-    assert offenders == [], (
-        f"{source.get_module_id(path)} binds unannotated `with` targets (section 14):\n" + "\n".join(offenders)
-    )
+    assert offenders == [], f"{source.get_module_id(path)} binds unannotated `with` targets:\n" + "\n".join(offenders)
 
 
-# Section 14's placement rule: a bare declaration sits directly above the statement it annotates, in the
-# same block. Hoisted out of a `try`, an `if` or a `with`, it reads as if it described that block, and
-# leaves the statement it belongs to looking unannotated. A loop is the one statement it may sit above
-# without being inside, because a name the loop rebinds cannot be declared in the body it is rebound in.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_bare_declarations_sit_above_what_they_annotate(path: pathlib.Path) -> None:
+    """Keep standalone annotations beside the statement that binds their names.
+
+    Reject a declaration stranded above an unrelated statement or outside a try
+    block. Allow stacked declarations for unpacking and declarations before a loop
+    that assigns the names in its body. Class fields are excluded because they
+    describe the class, not a following statement. This prevents misleading placement.
+    """
     offenders: Final[list[str]] = []
     block: Sequence[ast.stmt]
     for block in _get_blocks(source.parse(path)):
@@ -99,8 +106,7 @@ def test_bare_declarations_sit_above_what_they_annotate(path: pathlib.Path) -> N
                 )
 
     assert offenders == [], (
-        f"{source.get_module_id(path)} parks bare declarations away from what they annotate (section 14):\n"
-        + "\n".join(offenders)
+        f"{source.get_module_id(path)} parks bare declarations away from what they annotate:\n" + "\n".join(offenders)
     )
 
 
@@ -118,21 +124,22 @@ def _get_declared_rows(scope: source.Scope) -> dict[str, int]:
     if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
         argument: ast.arg
         for argument in source.get_parameters(scope):
-            declared[argument.arg] = 0
+            if argument.annotation is not None:
+                declared[argument.arg] = 0
 
     node: ast.stmt
     for node in source.get_scope_statements(scope):
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            declared.setdefault(node.target.id, node.lineno)
+            declared[node.target.id] = min(declared.get(node.target.id, node.lineno), node.lineno)
 
     return declared
 
 
 def _get_unannotated(target: ast.expr, *, declared: Mapping[str, int], row: int) -> list[str]:
     return [
-        name.id
-        for name in ast.walk(target)
-        if isinstance(name, ast.Name) and _DUMMY_NAME.match(name.id) is None and declared.get(name.id, row + 1) > row
+        name
+        for name in sorted(source.get_bound_names(target))
+        if _DUMMY_NAME.fullmatch(name) is None and declared.get(name, row + 1) > row
     ]
 
 
@@ -187,26 +194,37 @@ def _is_bound_by(node: ast.stmt, *, name: str) -> bool:
     if not isinstance(node, ast.For | ast.AsyncFor | ast.While):
         return False
 
-    return any(isinstance(nested, ast.stmt) and name in _get_bindings(nested) for nested in ast.walk(node))
+    pending: Final[list[ast.stmt]] = source.get_nested_statements(node)
+    nested: ast.stmt
+    while len(pending) > 0:
+        nested = pending.pop(0)
+        if isinstance(nested, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+
+        if name in _get_bindings(nested):
+            return True
+
+        pending.extend(source.get_nested_statements(nested))
+
+    return False
 
 
 def _get_bindings(node: ast.stmt) -> set[str]:
     if isinstance(node, ast.For | ast.AsyncFor):
-        return _get_names(node.target)
+        return source.get_bound_names(node.target)
 
     if isinstance(node, ast.With | ast.AsyncWith):
         return {
-            name for item in node.items if item.optional_vars is not None for name in _get_names(item.optional_vars)
+            name
+            for item in node.items
+            if item.optional_vars is not None
+            for name in source.get_bound_names(item.optional_vars)
         }
 
     if isinstance(node, ast.Assign):
-        return {name for target in node.targets for name in _get_names(target)}
+        return {name for target in node.targets for name in source.get_bound_names(target)}
 
     if isinstance(node, ast.AnnAssign | ast.AugAssign):
-        return _get_names(node.target)
+        return source.get_bound_names(node.target)
 
     return set()
-
-
-def _get_names(target: ast.expr) -> set[str]:
-    return {node.id for node in ast.walk(target) if isinstance(node, ast.Name)}

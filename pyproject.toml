@@ -13,13 +13,15 @@ dependencies = []
 [dependency-groups]
 lint = [
     # Linters.
-    "mypy>=2.3.1",
-    "ruff>=0.16.9",
+    "mypy>=2.4.0",
+    "ruff>=0.17.2",
     "pyright>=1.1.414",
     "python-lsp-server>=1.15.0",
-    "pylsp-mypy>=0.8.0",
+    "pylsp-mypy>=0.8.2",
+    # Git hooks.
+    "pre-commit>=4.7.0",
     # The `scripts/bump_deps.py` script.
-    "tomlkit>=0.15.1",
+    "tomlkit>=0.15.2",
 ]
 test = [
     "pytest>=9.1.1",
@@ -295,7 +297,7 @@ staticmethod-decorators = []
 [tool.ruff.lint.pylint]
 # https://docs.astral.sh/ruff/settings/#lint_pylint_max-args.
 # The default of 5 is too tight for APIs whose tail is `**attributes`: their reserved keywords must stay flat, so
-# they cannot move into an options object. 8 is the ceiling documented in `.claude/coding.md` section 4.
+# they cannot move into an options object. Keep the ceiling at 8 for these signatures.
 max-args = 8
 
 [tool.ruff.lint.pydocstyle]

@@ -17,12 +17,15 @@ __all__: Final[tuple[str, ...]] = (
 _IMPLICIT_CLASS_METHODS: Final[frozenset[str]] = frozenset({"__class_getitem__", "__init_subclass__", "__new__"})
 
 
-# Section 16. Ruff removed `ANN101`/`ANN102`, so nothing flags a bare `self` any more, and an unannotated
-# `self` is what makes a fluent method return the base class instead of the subclass a caller called it
-# on. The exception is a property on a `Protocol`: `Self` there resolves to the protocol, and pyright then
-# wants a getter taking the protocol as its first argument -- which no implementation can provide.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_the_receiver_of_a_method_is_typed(path: pathlib.Path) -> None:
+    """Require the documented type on instance and class receivers.
+
+    Instance methods use `self: Self`; classmethods and implicit class receivers
+    use `cls: type[Self]`. Protocol properties use bare self. Static methods are
+    skipped because Python supplies no receiver. This keeps fluent interfaces typed
+    without rejecting the deliberate protocol-property exception.
+    """
     offenders: Final[list[str]] = []
     node: ast.ClassDef
     method: ast.FunctionDef | ast.AsyncFunctionDef
@@ -40,16 +43,17 @@ def test_the_receiver_of_a_method_is_typed(path: pathlib.Path) -> None:
                 f"{actual}, expected {expected}"
             )
 
-    assert offenders == [], (
-        f"{source.get_module_id(path)} leaves method receivers mistyped (section 16):\n" + "\n".join(offenders)
-    )
+    assert offenders == [], f"{source.get_module_id(path)} leaves method receivers mistyped:\n" + "\n".join(offenders)
 
 
-# Section 18's first case: a method carrying `Self` marks its positional arguments positional-only. The
-# marker does mechanical work rather than decoration -- without it, a caller passing a keyword that
-# happens to match a positional parameter gets `TypeError: got multiple values for argument`.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_methods_mark_their_receiver_positional_only(path: pathlib.Path) -> None:
+    """Require a positional-only receiver on instance and class methods.
+
+    Accept `def read(self: Self, /)` and reject the same signature without `/`.
+    Skip static methods, which have no implicit receiver. This prevents callers
+    from depending on the receiver name or colliding with it through keyword arguments.
+    """
     offenders: Final[list[str]] = []
     node: ast.ClassDef
     method: ast.FunctionDef | ast.AsyncFunctionDef
@@ -57,20 +61,33 @@ def test_methods_mark_their_receiver_positional_only(path: pathlib.Path) -> None
         if len(method.args.posonlyargs) == 0:
             offenders.append(f"  {node.name}.{method.name} (line {method.lineno})")
 
-    assert offenders == [], f"{source.get_module_id(path)} defines methods without a `/` (section 18):\n" + "\n".join(
-        offenders
-    )
+    assert offenders == [], f"{source.get_module_id(path)} defines methods without a `/`:\n" + "\n".join(offenders)
 
 
-# Section 18's other half: do not add `/` decoratively. On a module-level function with no `**kwargs` it
-# removes a name dependency no caller had, and a file where half the helpers carry it and half do not is
-# worse than either convention applied throughout. A callback is the exception -- it is called
-# positionally by whoever holds it -- and section 23 is what makes a callback recognisable by name.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_positional_only_markers_earn_their_place(path: pathlib.Path) -> None:
+    """Reject unnecessary positional-only markers on ordinary helpers.
+
+    A module function or static method may use `/` when it is an `on_` callback
+    or accepts `**kwargs`; otherwise it should keep named arguments available.
+    Instance and class receivers are checked separately. This avoids decorative
+    restrictions that make callers less flexible without protecting a contract.
+    """
     offenders: Final[list[str]] = []
+    tree: Final[ast.Module] = source.parse(path)
+    candidates: Final[list[ast.stmt]] = list(tree.body)
+    class_node: ast.AST
+    for class_node in ast.walk(tree):
+        if isinstance(class_node, ast.ClassDef):
+            candidates.extend(
+                member
+                for member in class_node.body
+                if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef)
+                and "staticmethod" in source.get_decorator_names(member)
+            )
+
     node: ast.stmt
-    for node in source.parse(path).body:
+    for node in candidates:
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
 
@@ -81,8 +98,8 @@ def test_positional_only_markers_earn_their_place(path: pathlib.Path) -> None:
             offenders.append(f"  {node.name} (line {node.lineno})")
 
     assert offenders == [], (
-        f"{source.get_module_id(path)} marks arguments positional-only on a module-level function that "
-        f"takes no `**kwargs` and is no callback (section 18):\n" + "\n".join(offenders)
+        f"{source.get_module_id(path)} marks arguments positional-only on a function or static method that "
+        f"takes no `**kwargs` and is no callback:\n" + "\n".join(offenders)
     )
 
 

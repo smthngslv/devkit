@@ -9,9 +9,9 @@ project.
 ## Layout
 
 ```
-.claude/
-  CLAUDE.md                  # project instructions for AI assistants; points at the rules
-  coding.md                  # the coding rules: design, correctness, style, practice
+AGENTS.md                    # agent instructions; points at the coding guide
+.pre-commit-config.yaml      # source checks and Conventional Commit validation
+docs/coding.md               # house style and conventions beyond standard tooling
 .zed/settings.json           # Zed: ruff, pyright and pylsp from the project venv, format on save
 Makefile                     # format, lint, test, install-hooks, bump-deps, bump, version
 pyproject.toml               # ruff, mypy, pyright (strict) and pytest configuration
@@ -29,10 +29,14 @@ uv sync                      # create .venv with the lint and test groups
 make format                  # ruff --fix and ruff format
 make lint                    # ruff check, ruff format --check, mypy, pyright
 make test                    # pytest, which includes the convention gates
-make install-hooks           # pre-commit hook running `make lint test`
+make install-hooks           # install pre-commit and commit-msg hooks
 make bump-deps               # upgrade every dependency and rewrite the floors in pyproject.toml
 make bump VERSION=x.y.z      # set the project version and refresh the lockfile
 ```
+
+Run `make install-hooks` once per clone. The pre-commit hook runs `make format lint test`; if formatting changes files,
+review and stage them before retrying the commit. The commit-msg hook requires Conventional Commits, for example
+`fix: handle empty input` or `feat(parser): support quoted values`. Strict validation also rejects merge and fixup messages.
 
 <!-- template:start -->
 ## Starting a project from this template
@@ -52,7 +56,7 @@ touched, so review the result with `git status`, point `origin` at your own repo
 
 ## The convention gates
 
-`src/devkit_tests/conventions/` walks the package, the tests and `scripts/`, and fails on any file breaking a rule
-marked `[gated]` in `.claude/coding.md`. `source.py` holds the shared parsing helpers; each `test_*.py` module holds
+`src/devkit_tests/conventions/` walks the package, the tests and `scripts/`, and checks the mechanical conventions summarized in
+`docs/coding.md`. `source.py` holds the shared parsing helpers; each `test_*.py` module holds
 one family of rules, and `test_gates.py` proves each gate fires on a fixture that breaks it, so a gate that stops
 checking anything fails too.

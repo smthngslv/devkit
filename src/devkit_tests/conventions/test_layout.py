@@ -25,11 +25,15 @@ _TRIPLE_QUOTES: Final[tuple[str, ...]] = ('"""', "'''")
 _TRAILING_WHITESPACE: Final[tuple[str, ...]] = (" ", "\t", "\n", "\\n", "\\t")
 
 
-# Section 28: a blank line wherever the indentation decreases -- leaving any indented block, and between
-# an `if` body and its `else` or a `try` body and its `except`. Nothing in ruff or the formatter checks
-# it, and without it the eye reads a dedented statement as the last line of the block it just left.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_a_dedent_is_preceded_by_a_blank_line(path: pathlib.Path) -> None:
+    """Require visual separation when code leaves an indented block.
+
+    For example, insert a blank line between an if body and its else clause or
+    the next outer statement. If the outer statement has a comment, put the
+    blank line above that comment. Wrapped expressions do not count as new blocks.
+    This enforces the project spacing preference beyond ordinary formatting.
+    """
     text: Final[str] = source.read(path)
     lines: Final[Sequence[str]] = text.splitlines()
     logical: Final[Sequence[source.LogicalLine]] = source.get_logical_lines(text)
@@ -42,22 +46,24 @@ def test_a_dedent_is_preceded_by_a_blank_line(path: pathlib.Path) -> None:
         if not _is_preceded_by_a_blank_line(lines, row=logical[index].row):
             offenders.append(f"  line {logical[index].row}: {lines[logical[index].row - 1].strip()}")
 
-    assert offenders == [], (
-        f"{source.get_module_id(path)} dedents without a blank line above (section 28):\n" + "\n".join(offenders)
-    )
+    assert offenders == [], f"{source.get_module_id(path)} dedents without a blank line above:\n" + "\n".join(offenders)
 
 
-# Section 39: when a string is split across lines by implicit concatenation, the space goes at the end of
-# the line that owns it. Led with, it hides at the left margin against the indentation, and the two
-# halves read as though the words had run together.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_split_strings_keep_the_space_on_the_line_above(path: pathlib.Path) -> None:
+    """Keep word-separating spaces at the end of continued string fragments.
+
+    Prefer `"hello "` followed on the next line by `"world"` over `"hello"`
+    followed by `" world"`. Allow intentional indentation after existing whitespace,
+    separate strings in containers, and fragments on one line. This keeps word
+    boundaries visible without changing intentional whitespace inside text.
+    """
     offenders: Final[list[str]] = [
         f"  line {row}" for row in _get_continuations_leading_with_a_space(source.read(path))
     ]
 
-    assert offenders == [], (
-        f"{source.get_module_id(path)} starts a continued string with a space (section 39):\n" + "\n".join(offenders)
+    assert offenders == [], f"{source.get_module_id(path)} starts a continued string with a space:\n" + "\n".join(
+        offenders
     )
 
 

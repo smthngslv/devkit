@@ -14,18 +14,18 @@ __all__: Final[tuple[str, ...]] = (
     "test_class_names_do_not_repeat_their_namespace",
 )
 
-# Section 23's boolean prefixes. Every one of them turns a name into a yes/no question, which is what
+# The naming rule's boolean prefixes. Every one of them turns a name into a yes/no question, which is what
 # makes `is_enabled=False` readable at a call site where `enabled=False` needs the signature to decode.
 _BOOLEAN_PREFIXES: Final[tuple[str, ...]] = ("allow_", "can_", "has_", "is_", "should_", "use_")
 
 # What a boolean is annotated as, once `Final`/`ClassVar` and any namespace are stripped off. A wider
-# union is a different question -- `bool | Set[str]` on `include_args_` is a mode, not a yes/no -- and an
-# unannotated `RETRY = True` is outside the gate entirely, since nothing requires an annotation there.
-_BOOLEAN_ANNOTATIONS: Final[frozenset[str]] = frozenset({"bool", "bool | None"})
+# union is a different question -- `bool | Set[str]` is a mode, not a yes/no. Literal boolean
+# assignments are also checked, even without an annotation.
+_BOOLEAN_ANNOTATIONS: Final[frozenset[str]] = frozenset({"bool", "bool | None", "None | bool"})
 
 _WRAPPERS: Final[tuple[str, ...]] = ("ClassVar", "Final")
 
-# Section 23's callback spelling: the `on_` prefix says a callback is what it is, and the `_callback`
+# The naming rule's callback spelling: the `on_` prefix says a callback is what it is, and the `_callback`
 # postfix says a parameter is holding one rather than being handed ordinary data.
 _CALLBACK_PARAMETER: Final[re.Pattern[str]] = re.compile(r"^_?on_[a-z0-9_]*_callback$")
 
@@ -39,11 +39,15 @@ _CALLBACK_HINT: Final[re.Pattern[str]] = re.compile(r"^_?on_|callback")
 _MINIMUM_STEM_LENGTH: Final[int] = 4
 
 
-# Section 23: every boolean name carries a prefix that makes the yes/no meaning unambiguous. Nothing in
-# ruff reads a name against its type -- `FBT` only forces a boolean to be keyword-only -- so `retry=True`
-# passes every check while leaving a reader to guess whether it retries or reports having retried.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_boolean_names_say_what_true_means(path: pathlib.Path) -> None:
+    """Require boolean names to read as yes-or-no questions.
+
+    Check boolean annotations, optional booleans, and assignments of True or False.
+    For example, use `should_retry` instead of `retry`. Ignore indexed writes,
+    which do not declare a variable name. Types inferred from arbitrary calls are
+    outside this syntax check, so semantic naming still needs review.
+    """
     offenders: Final[list[str]] = []
     row: int
     name: str
@@ -55,15 +59,19 @@ def test_boolean_names_say_what_true_means(path: pathlib.Path) -> None:
 
     assert offenders == [], (
         f"{source.get_module_id(path)} names booleans without a prefix from {list(_BOOLEAN_PREFIXES)} "
-        f"(section 23):\n" + "\n".join(offenders)
+        f"(the naming rule):\n" + "\n".join(offenders)
     )
 
 
-# Section 23 again, for the parameter that holds a callback. Both halves of the spelling carry meaning --
-# `on_event` alone reads as an event, `event_callback` alone does not say when it is called -- so a name
-# claiming either half has to carry both.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_callback_parameters_are_named_as_callbacks(path: pathlib.Path) -> None:
+    """Require callback-like parameter names to use both naming markers.
+
+    A parameter named `on_event` or `event_callback` must become
+    `on_event_callback`. This is a spelling heuristic: it checks names that already
+    claim to be callbacks, not every callable type or function passed at runtime.
+    The two markers explain both when the callback runs and what the argument holds.
+    """
     offenders: Final[list[str]] = []
     function: ast.FunctionDef | ast.AsyncFunctionDef
     for function in source.get_functions(source.parse(path)):
@@ -75,17 +83,20 @@ def test_callback_parameters_are_named_as_callbacks(path: pathlib.Path) -> None:
             offenders.append(f"  line {argument.lineno}: {function.name}({argument.arg})")
 
     assert offenders == [], (
-        f"{source.get_module_id(path)} names callback parameters against section 23 -- the spelling is "
+        f"{source.get_module_id(path)} names callback parameters against the naming rule -- the spelling is "
         f"`on_<event>_callback`:\n" + "\n".join(offenders)
     )
 
 
-# Section 23's namespace-aware naming: a name is read with the namespace it is reached through, so
-# repeating that namespace in the name says everything twice. The namespace is the package when the
-# package lifts the symbol into its `__init__` (section 22), and the module otherwise -- which is why
-# `catalog.Catalog` is `data.Catalog` at every call site and reads once there.
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
 def test_class_names_do_not_repeat_their_namespace(path: pathlib.Path) -> None:
+    """Reject class names with redundant module prefixes or suffixes.
+
+    For example, prefer `events.Bus` over `events.EventBus`. Use the package
+    namespace for a symbol re-exported from that module. Exempt exception classes,
+    short namespace stems, and exact class/module matches. This is a conservative
+    spelling check; deciding whether a name is meaningful still requires review.
+    """
     offenders: Final[list[str]] = []
     node: ast.stmt
     for node in source.parse(path).body:
@@ -96,23 +107,28 @@ def test_class_names_do_not_repeat_their_namespace(path: pathlib.Path) -> None:
         if _is_repeating(node.name, namespace=namespace):
             offenders.append(f"  line {node.lineno}: `{node.name}` reads as {namespace}.{node.name}")
 
-    assert offenders == [], (
-        f"{source.get_module_id(path)} repeats its namespace in a class name (section 23):\n" + "\n".join(offenders)
+    assert offenders == [], f"{source.get_module_id(path)} repeats its namespace in a class name:\n" + "\n".join(
+        offenders
     )
 
 
 def _get_boolean_names(tree: ast.Module) -> Iterator[tuple[int, str]]:
     node: ast.AST
     for node in ast.walk(tree):
-        if isinstance(node, ast.AnnAssign) and _is_boolean(node.annotation):
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name | ast.Attribute)
+            and _is_boolean(node.annotation)
+        ):
             yield node.lineno, ast.unparse(node.target).rpartition(".")[2]
 
         # Unannotated, but `= True` says what the type is as plainly as an annotation would. `ANN` does
-        # not reach an assignment, so without this a boolean dodges section 23 by dropping its type.
+        # not reach an assignment, so without this a boolean dodges the naming rule by dropping its type.
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, bool):
             target: ast.expr
             for target in node.targets:
-                yield node.lineno, ast.unparse(target).rpartition(".")[2]
+                if isinstance(target, ast.Name | ast.Attribute):
+                    yield node.lineno, ast.unparse(target).rpartition(".")[2]
 
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
@@ -127,7 +143,7 @@ def _is_boolean(annotation: ast.expr) -> bool:
     # Through `Final[...]` / `ClassVar[...]` and past any namespace, so `typing.Final[bool]` is the same
     # question as `bool` -- the spelling of the wrapper says nothing about whether the name is a yes/no.
     inner: ast.expr = annotation
-    if isinstance(inner, ast.Subscript) and _get_head(inner.value) in _WRAPPERS:
+    while isinstance(inner, ast.Subscript) and _get_head(inner.value) in _WRAPPERS:
         inner = inner.slice
 
     return ast.unparse(inner) in _BOOLEAN_ANNOTATIONS
@@ -142,20 +158,26 @@ def _get_namespace(path: pathlib.Path, *, name: str) -> str:
         return path.parent.name
 
     # A symbol the package lifts into its `__init__` is read through the package, never through the
-    # submodule it happens to live in -- which is the whole point of lifting it (section 22, case 1).
+    # submodule it happens to live in -- which is the whole point of lifting it (the import rule, case 1).
     marker: Final[pathlib.Path] = path.parent / "__init__.py"
-    if marker.exists() and name in _get_lifted_names(marker):
+    if marker.exists() and name in _get_lifted_names(marker, module=path.stem):
         return path.parent.name
 
     return path.stem
 
 
-def _get_lifted_names(marker: pathlib.Path) -> frozenset[str]:
+def _get_lifted_names(marker: pathlib.Path, *, module: str) -> frozenset[str]:
     return frozenset(
         alias.asname if alias.asname is not None else alias.name
         for node in source.parse(marker).body
         if isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and (
+            (node.level == 1 and node.module == module)
+            or (node.level == 0 and node.module.endswith(f"{marker.parent.name}.{module}"))
+        )
         for alias in node.names
+        if alias.asname is None or alias.asname == alias.name
     )
 
 
@@ -175,7 +197,7 @@ def _is_repeating(name: str, *, namespace: str) -> bool:
     # Depluralized, because `market.splits` holds a `Split` and that is the name repeating, not `Splits`.
     stem: Final[str] = namespace.removesuffix("s")
     lowered: Final[str] = name.lower()
-    # An exact match is the case section 22 repairs by lifting the symbol: `catalog.Catalog` becomes
+    # An exact match is the case the import rule repairs by lifting the symbol: `catalog.Catalog` becomes
     # `data.Catalog`, and the namespace it is read through is then not the one it repeats.
     if lowered in (namespace, stem) or len(stem) < _MINIMUM_STEM_LENGTH:
         return False

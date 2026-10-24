@@ -21,6 +21,7 @@ __all__: Final[tuple[str, ...]] = (
     "LogicalLine",
     "Scope",
     "Visibility",
+    "get_bound_names",
     "get_canonical_order",
     "get_comments",
     "get_decorator_names",
@@ -47,7 +48,7 @@ type Scope = ast.Module | ast.FunctionDef | ast.AsyncFunctionDef
 
 # The directory each package occupies, read off the package rather than spelled again as a path. Both are
 # walked, because the conventions are not narrower inside the tests: `devkit_tests` declares what it
-# offers and hides what it does not, exactly like the code it exercises (sections 21, 24).
+# offers and hides what it does not, exactly like the code it exercises.
 PACKAGE_ROOT: Final[pathlib.Path] = pathlib.Path(next(iter(devkit.__path__)))
 
 TESTS_ROOT: Final[pathlib.Path] = pathlib.Path(devkit_tests.__file__).parent
@@ -57,12 +58,12 @@ SOURCE_ROOT: Final[pathlib.Path] = TESTS_ROOT.parent
 
 # The operator scripts, which the src layout keeps out of the wheel. Walked like the two packages: ruff
 # and mypy already read them, and a rule that stops at the package boundary is a rule the next module
-# written outside it will break -- which is what happened to section 24's module-scope rule, in a script
-# nothing was checking (section 7).
+# written outside it will break -- which is what happened to the module privacy rule, in a script
+# nothing was checking.
 SCRIPTS_ROOT: Final[pathlib.Path] = SOURCE_ROOT.parent / "scripts"
 
 # The pragmas a tool reads positionally, and therefore the only comments allowed to sit inline. Spelled
-# once, so the comment rule and the suppression rule cannot drift apart (sections 3, 17, 32).
+# once, so the comment rule and the suppression rule cannot drift apart.
 #
 # These three and no others, one per tool: noqa is ruff's, type is mypy's, pyright is pyright's. The
 # file-level forms are absent deliberately -- nothing here uses one, and a file-wide suppression is not
@@ -70,8 +71,8 @@ SCRIPTS_ROOT: Final[pathlib.Path] = SOURCE_ROOT.parent / "scripts"
 # a directive out of any comment that carries one, including this one.
 PRAGMA_PREFIXES: Final[tuple[str, ...]] = ("# noqa", "# pyright:", "# type:")
 
-# What section 16's receiver rule and section 33's ordering both have to recognise. Spelled once, so the
-# two gates cannot drift apart on what a property is (section 3).
+# What the receiver and ordering checks both have to recognise. Spelled once, so the
+# two gates cannot drift apart on what a property is.
 PROPERTY_DECORATORS: Final[frozenset[str]] = frozenset({"cached_property", "property", "setter"})
 
 # Tokens that carry no statement of their own, so none of them starts a logical line.
@@ -82,7 +83,7 @@ _IGNORED_TOKENS: Final[frozenset[int]] = frozenset(
 
 def get_module_paths() -> list[pathlib.Path]:
     # No annotation on `root`: a comprehension owns its own scope, so one declared out here would be dead
-    # (section 14 asks for the annotation once per scope, and this is not that scope).
+    # (the annotation rule asks for the annotation once per scope, and this is not that scope).
     return sorted(path for root in (PACKAGE_ROOT, TESTS_ROOT, SCRIPTS_ROOT) for path in root.rglob("*.py"))
 
 
@@ -106,6 +107,19 @@ def read(path: pathlib.Path) -> str:
 
 def parse(path: pathlib.Path) -> ast.Module:
     return ast.parse(path.read_text())
+
+
+def get_bound_names(target: ast.expr) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+
+    if isinstance(target, ast.Starred):
+        return get_bound_names(target.value)
+
+    if isinstance(target, ast.Tuple | ast.List):
+        return {name for element in target.elts for name in get_bound_names(element)}
+
+    return set()
 
 
 def get_defined_name(node: ast.stmt) -> str | None:
@@ -133,7 +147,7 @@ def get_scope_statements(scope: Scope) -> Iterator[ast.stmt]:
     #
     # `Scope` rather than `ast.AST`: reaching `body` by `getattr` with an empty default made a node this
     # function did not understand yield nothing, and nothing is indistinguishable from a clean scope
-    # (section 7 -- when a check cannot be performed, refuse). The union is a type error at the call site.
+    # (the gate policy -- when a check cannot be performed, refuse). The union is a type error at the call site.
     pending: Final[list[ast.stmt]] = list(scope.body)
     node: ast.stmt
     while len(pending) > 0:
@@ -162,28 +176,16 @@ def get_nested_statements(node: ast.stmt) -> list[ast.stmt]:
 
 
 def get_module_level_names(tree: ast.Module) -> Iterator[str]:
-    # Everything the module binds at its own scope: imports, because an imported name is as much a name a
-    # class body can shadow as one the module defines itself, and the definitions inside a `TYPE_CHECKING`
-    # branch, because a conditional import binds at module scope like any other.
+    pending: Final[list[ast.stmt]] = list(tree.body)
     node: ast.stmt
-    for node in tree.body:
+    while len(pending) > 0:
+        node = pending.pop(0)
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             yield node.name
+            continue
 
-    for node in get_scope_statements(tree):
-        if isinstance(node, ast.Import | ast.ImportFrom):
-            alias: ast.alias
-            for alias in node.names:
-                yield alias.asname if alias.asname is not None else alias.name.partition(".")[0]
-
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            yield node.target.id
-
-        elif isinstance(node, ast.Assign):
-            target: ast.expr
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    yield target.id
+        yield from _get_statement_names(node)
+        pending.extend(get_nested_statements(node))
 
 
 def get_import_time_expressions(node: ast.stmt, *, is_annotation_forced: bool = False) -> list[ast.expr]:
@@ -204,7 +206,7 @@ def get_import_time_expressions(node: ast.stmt, *, is_annotation_forced: bool = 
         expressions = [*node.decorator_list, *_get_defaults(node.args)]
         # A decorator may introspect the signature -- `include_args_` on the tracing decorators calls
         # `inspect.signature`, and pytest's fixture machinery does the same -- and under PEP 649 that
-        # forces the annotations to be evaluated right there, at decoration time (section 44.2).
+        # forces the annotations to be evaluated right there, at decoration time.
         if is_annotation_forced or len(node.decorator_list) > 0:
             expressions.extend(_get_annotations(node))
 
@@ -242,7 +244,7 @@ def get_canonical_order(
     names: Sequence[str], *, ranks: Mapping[str, int], requires: Mapping[str, AbstractSet[str]]
 ) -> list[str]:
     # Lowest rank first, original position as the tie-break, but never before something it needs. This is
-    # section 33's order wherever Python permits it, and only ever deviates where it does not.
+    # the ordering rule's order wherever Python permits it, and only ever deviates where it does not.
     #
     # Positions rather than names, because a name can appear twice -- a `@property` and its `@x.setter`
     # bind one -- and a set of placed *names* can never select the second of a pair. The loop then ran
@@ -261,7 +263,7 @@ def get_canonical_order(
             for index in range(len(names))
             if index not in placed and (requires[names[index]] & declared) <= satisfied
         ]
-        # Fail closed (section 7): a cycle means the order cannot be computed, and a gate that green-lights
+        # Fail closed: a cycle means the order cannot be computed, and a gate that green-lights
         # what it could not answer is worse than one that stops.
         if len(ready) == 0:
             _refuse_cycle(names, placed=placed)
@@ -339,7 +341,7 @@ def get_comments(source: str) -> list[Comment]:
 def get_logical_lines(source: str) -> list[LogicalLine]:
     # Where each statement or clause header starts. A continuation inside brackets emits `NL` rather than
     # `NEWLINE`, so a wrapped call stays one logical line, while `else` and `except` head their own --
-    # which is what lets section 28 see the dedent into them.
+    # which is what lets the spacing rule see the dedent into them.
     logical: Final[list[LogicalLine]] = []
     is_line_pending: bool = True
     token: tokenize.TokenInfo
@@ -354,6 +356,46 @@ def get_logical_lines(source: str) -> list[LogicalLine]:
             is_line_pending = False
 
     return logical
+
+
+def _get_statement_names(node: ast.stmt) -> Iterator[str]:
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        yield from (alias.asname if alias.asname is not None else alias.name.partition(".")[0] for alias in node.names)
+
+    elif isinstance(node, ast.TypeAlias):
+        yield node.name.id
+
+    elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.For | ast.AsyncFor):
+        yield from get_bound_names(node.target)
+
+    elif isinstance(node, ast.Assign):
+        yield from (name for target in node.targets for name in get_bound_names(target))
+
+    elif isinstance(node, ast.With | ast.AsyncWith):
+        yield from (
+            name
+            for item in node.items
+            if item.optional_vars is not None
+            for name in get_bound_names(item.optional_vars)
+        )
+
+    elif isinstance(node, ast.Try | ast.TryStar):
+        yield from (handler.name for handler in node.handlers if handler.name is not None)
+
+    elif isinstance(node, ast.Match):
+        yield from _get_pattern_names(node)
+
+
+def _get_pattern_names(node: ast.Match) -> Iterator[str]:
+    case: ast.match_case
+    for case in node.cases:
+        pattern: ast.AST
+        for pattern in ast.walk(case.pattern):
+            if isinstance(pattern, ast.MatchAs | ast.MatchStar) and pattern.name is not None:
+                yield pattern.name
+
+            elif isinstance(pattern, ast.MatchMapping) and pattern.rest is not None:
+                yield pattern.rest
 
 
 def _refuse_cycle(names: Sequence[str], *, placed: AbstractSet[int]) -> Never:
