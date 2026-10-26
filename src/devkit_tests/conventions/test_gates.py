@@ -10,6 +10,7 @@ import pytest
 from devkit_tests.conventions import (
     source,
     test_annotations,
+    test_calls,
     test_comments,
     test_exports,
     test_layout,
@@ -138,13 +139,140 @@ def test_namespace_exemption_belongs_to_the_exported_module(tmp_path: pathlib.Pa
     in events.py. This prevents an unrelated import from disabling the name check.
     """
     _write(f"from .{imported_module} import EventBus\n", path=tmp_path, name="__init__.py")
-    path: Final[pathlib.Path] = _write("class EventBus:\n    pass\n", path=tmp_path, name="events.py")
+    path: Final[pathlib.Path] = _write(source="class EventBus:\n    pass\n", path=tmp_path, name="events.py")
     if imported_module == "events":
         test_naming.test_class_names_do_not_repeat_their_namespace(path)
 
     else:
         with pytest.raises(AssertionError, match=re.escape(str(path))):
             test_naming.test_class_names_do_not_repeat_their_namespace(path)
+
+
+@pytest.mark.parametrize(
+    "argument", ["30", "-30", "+30", "1.5", "-1.5", "1j", "'host'", "b'host'", "True", "None", "[]", "{}", "()", "{1}"]
+)
+def test_literal_call_gate_rejects_literal_forms(tmp_path: pathlib.Path, argument: str) -> None:
+    """Reject scalar, signed, and container literals when the known parameter accepts a keyword.
+
+    Negative numbers are unary expressions in Python's AST, so checking only
+    constant nodes would miss `connect(-30)`. The error must identify both the
+    source file and the parameter to name at the call site.
+    """
+    path: Final[pathlib.Path] = _write(
+        source=f"def connect(timeout_s):\n    pass\n\nconnect({argument})\n", path=tmp_path, name="probe.py"
+    )
+    captured: pytest.ExceptionInfo[AssertionError]
+    with pytest.raises(AssertionError) as captured:
+        test_calls.test_literal_arguments_use_keywords(path)
+
+    assert str(path) in str(captured.value)
+    assert "timeout_s=..." in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("snippet", "should_fail"),
+    [
+        pytest.param("def connect(timeout_s): pass\nconnect(timeout_s=30)\n", False, id="keyword"),
+        pytest.param("def connect(timeout_s): pass\nconnect(Timeouts.DEFAULT)\n", False, id="enum"),
+        pytest.param("def connect(timeout_s): pass\nconnect(timeout)\n", False, id="named-value"),
+        pytest.param("def connect(timeout_s, /): pass\nconnect(30)\n", False, id="positional-only"),
+        pytest.param("def connect(*values): pass\nconnect(30)\n", False, id="variadic"),
+        pytest.param("def connect(host, /, timeout_s): pass\nconnect('host', 30)\n", True, id="mixed-parameters"),
+        pytest.param("def connect(host, /, timeout_s): pass\nconnect('host', timeout_s=30)\n", False, id="mixed-valid"),
+        pytest.param("def connect(timeout_s, *values): pass\nconnect(30, 40)\n", True, id="fixed-before-variadic"),
+        pytest.param("def connect(timeout_s): pass\nconnect(30, *values)\n", False, id="starred-call"),
+        pytest.param("def connect(timeout_s): pass\nconnect(*values, 30)\n", False, id="after-starred"),
+        pytest.param("def connect(timeout_s, **kwargs): pass\nconnect(30, **options)\n", True, id="keyword-unpacking"),
+        pytest.param("async def connect(timeout_s): pass\nasync def run():\n    await connect(30)\n", True, id="async"),
+        pytest.param("def run():\n    def connect(timeout_s): pass\n    connect(30)\n", True, id="nested-function"),
+        pytest.param("def connect(timeout_s): pass\ndef run():\n    connect(30)\n", True, id="outer-binding"),
+        pytest.param(
+            "def connect(timeout_s): pass\ndef run(connect):\n    connect(30)\n", False, id="parameter-shadow"
+        ),
+        pytest.param(
+            "def connect(timeout_s): pass\ndef run():\n    connect = other\n    connect(30)\n",
+            False,
+            id="local-rebinding",
+        ),
+        pytest.param("def connect(timeout_s): pass\nconnect = other\nconnect(30)\n", False, id="module-rebinding"),
+        pytest.param(
+            "def connect(timeout_s): pass\ndef connect(timeout_s, /): pass\nconnect(30)\n", False, id="redefinition"
+        ),
+        pytest.param("@wrapper\ndef connect(timeout_s): pass\nconnect(30)\n", False, id="decorated-function"),
+        pytest.param("from external import connect\nconnect(30)\n", False, id="import"),
+        pytest.param(
+            "def connect(timeout_s): pass\nfrom external import connect\nconnect(30)\n", False, id="import-shadow"
+        ),
+        pytest.param(
+            "def connect(timeout_s): pass\nfrom external import *\nconnect(30)\n", False, id="wildcard-import"
+        ),
+        pytest.param("def connect(timeout_s): pass\nclient.connect(30)\n", False, id="method"),
+        pytest.param("range(10)\n", False, id="builtin"),
+        pytest.param(
+            "def connect(timeout_s): pass\nclass Client:\n    def run(self):\n        connect(30)\n",
+            True,
+            id="call-in-method",
+        ),
+        pytest.param(
+            "def connect(timeout_s): pass\nclass Client:\n    def connect(self, value): pass\n"
+            "    def run(self):\n        connect(30)\n",
+            True,
+            id="class-members-are-not-closures",
+        ),
+        pytest.param(
+            "def connect(timeout_s): pass\ndef run[connect]():\n    connect(30)\n", False, id="type-parameter-shadow"
+        ),
+        pytest.param(
+            "def connect(timeout_s): pass\nclass Client[connect]:\n    def run(self):\n        connect(30)\n",
+            False,
+            id="class-type-parameter-shadow",
+        ),
+        pytest.param("def connect(timeout_s): pass\n(lambda connect: connect(30))(other)\n", False, id="lambda-scope"),
+        pytest.param(
+            "def connect(timeout_s): pass\n[connect(30) for connect in clients]\n", False, id="comprehension-scope"
+        ),
+        pytest.param(
+            "def connect(timeout_s): pass\ndef run():\n    global connect\n    connect(30)\n",
+            False,
+            id="global-binding",
+        ),
+        pytest.param(
+            "def run():\n    def connect(timeout_s): pass\n"
+            "    def inner():\n        nonlocal connect\n        connect(30)\n",
+            False,
+            id="nonlocal-binding",
+        ),
+        pytest.param(
+            "def connect(timeout_s): pass\ntry: pass\nexcept Error as connect:\n    connect(30)\n",
+            False,
+            id="exception-binding",
+        ),
+        pytest.param(
+            "def connect(timeout_s): pass\nmatch value:\n    case {'client': connect}:\n        connect(30)\n",
+            False,
+            id="pattern-binding",
+        ),
+        pytest.param("def connect(timeout_s): pass\ndef run(value=connect(30)): pass\n", True, id="default-expression"),
+        pytest.param("def connect(timeout_s): pass\n@connect(30)\ndef run(): pass\n", True, id="decorator-expression"),
+    ],
+)
+def test_literal_call_gate_respects_signature_and_scope(
+    tmp_path: pathlib.Path, snippet: str, *, should_fail: bool
+) -> None:
+    """Check literal calls only when their parameter names and function bindings are known.
+
+    Cover positional-only and variadic APIs, readable enum members, nested and
+    async functions, defaults, and decorators. Shadowing and unknown signatures
+    must not borrow a same-named function's signature and report a false failure.
+    These boundaries keep the checker safe without executing application code.
+    """
+    path: Final[pathlib.Path] = _write(source=snippet, path=tmp_path, name="probe.py")
+    if should_fail:
+        with pytest.raises(AssertionError, match="timeout_s"):
+            test_calls.test_literal_arguments_use_keywords(path)
+
+    else:
+        test_calls.test_literal_arguments_use_keywords(path)
 
 
 def _write(source: str, *, path: pathlib.Path, name: str) -> pathlib.Path:
@@ -167,6 +295,11 @@ class _Case:
 
 
 _CASES: Final[tuple[_Case, ...]] = (
+    _Case(
+        gate=test_calls.test_literal_arguments_use_keywords,
+        violating="def connect(timeout_s): pass\nconnect(30)\n",
+        clean="def connect(timeout_s): pass\nconnect(timeout_s=30)\n",
+    ),
     _Case(
         gate=test_annotations.test_loop_variables_are_annotated,
         violating=_HEADER + "\n\ndef read(rows: list[str]) -> None:\n    for row in rows:\n        print(row)\n",

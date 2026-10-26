@@ -66,6 +66,24 @@ def describe(event: Event) -> str:
     return str(event)
 ```
 
+At call sites, pass literal values by keyword when the API permits it, so their meaning is visible without inspecting
+the signature. Enum members may be passed positionally when their qualified names make the call clear, such as
+`connect(Timeouts.DEFAULT)`. This exception does not change keyword-only parameter requirements.
+The call-site gate checks statically resolved, undecorated functions in the same file, including nested and async
+functions. Calls through imports, methods, decorators, dynamic bindings, or positional unpacking remain review
+checks, as do calls inside lambdas or comprehensions and whether an enum name makes the call clear.
+
+```python
+# Name the meaning of a literal value.
+connect(timeout_s=30)
+
+# Avoid an unexplained positional literal when a keyword is accepted.
+connect(30)
+
+# A descriptive enum member can make a positional argument clear.
+connect(Timeouts.DEFAULT)
+```
+
 ## Classes and privacy
 
 Instance attributes are private (`__name`) by default; use protected (`_name`) only for inheritance and public names
