@@ -1,3 +1,5 @@
+"""Check positional literal arguments when parameter names are known."""
+
 import ast
 import pathlib
 from collections.abc import Iterable, Iterator, Mapping
@@ -60,6 +62,7 @@ def test_literal_arguments_use_keywords(path: pathlib.Path) -> None:
 def _get_scope_calls(
     scope: source.Scope, *, inherited: Mapping[str, _Function | None]
 ) -> Iterator[tuple[ast.Call, _Function]]:
+    """Yield calls whose local function binding is known in this scope."""
     bindings: Final[dict[str, _Function | None]] = dict(inherited) | _get_bindings(scope)
     statement: ast.stmt
     for statement in scope.body:
@@ -112,6 +115,7 @@ def _get_method_calls(
 
 
 def _get_bindings(scope: source.Scope) -> dict[str, _Function | None]:
+    """Track local functions and mark shadowed names as unresolved."""
     bindings: Final[dict[str, _Function | None]] = {}
     if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
         _bind_names(

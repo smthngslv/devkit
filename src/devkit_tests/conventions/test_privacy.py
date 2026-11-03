@@ -1,3 +1,5 @@
+"""Check module-level private-name spelling."""
+
 import ast
 import pathlib
 from typing import Final

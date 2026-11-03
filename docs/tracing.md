@@ -23,8 +23,9 @@ def load(item_id: str) -> str:
 
 This example writes to the console without uploading to Logfire. Use the
 [Logfire configuration reference](https://pydantic.dev/docs/logfire/api/logfire/) to configure your application's
-export destination. Pass `logfire=instance` to `Tracer` when using a separately configured Logfire instance.
-The wrapper does not add application-specific tags. `get_child("worker", tags={"worker"})` extends the scope
+export destination. Every `Tracer` uses Logfire's default instance, so module-level tracers can be created before
+`logfire.configure()` runs. The wrapper does not add application-specific tags.
+`get_child("worker", tags={"worker"})` extends the scope
 and inherits existing tags.
 
 ## Logs and spans
@@ -46,7 +47,7 @@ The closed parent cannot receive later attributes or a return value. Its duratio
 whole operation. Use this mode only when immediate parent visibility matters more than measuring total duration.
 
 `Level` values use OpenTelemetry severity numbers. `tracer.level` is the configured numeric minimum, including
-custom thresholds between named levels. `tracer.logfire` exposes the underlying instance as a public `Final` field.
+custom thresholds between named levels. `tracer.logfire_instance` exposes the scoped default instance as a public `Final` field.
 Structured current-span attributes currently use a Logfire internal serialization helper to retain JSON schemas;
 the integration tests cover that dependency when upgrading the SDK.
 
@@ -99,25 +100,29 @@ def resource() -> Generator[str]:
 
 ## Context propagation and reset
 
-Capture a parent with `Context.get_current()`. `to_json_dict()` and `from_json_dict()` transport its `traceparent`
-field; `to_bytes()` and `from_bytes()` use a compact 26-byte representation, or empty bytes for no parent.
-The format supports W3C version-00 traceparent values and rejects malformed values and zero IDs. It carries the
-parent only, without `tracestate` or baggage.
+Capture the current trace parent and baggage with `Context.get_current()`. `to_json_dict()` and `from_json_dict()`
+transport an optional `traceparent` and a `baggage` mapping. `to_bytes()` and `from_bytes()` use MessagePack for the
+same values. The parent supports W3C version-00 traceparent values and rejects malformed values and zero IDs.
+Baggage keys and values must be strings. Keep baggage small and free of secrets because it can propagate to other
+services. `Context.is_empty` is true only when both parent and baggage are absent.
 
 ```python
-context: Final[tracing.Context] = tracing.Context.get_current()
-payload: Final[dict[str, str]] = context.to_json_dict()
+with logfire.set_baggage(tenant="alpha"):
+    context: Final[tracing.Context] = tracing.Context.get_current()
+
+payload: Final[dict[str, str | dict[str, str]]] = context.to_json_dict()
 
 with tracing.Context.from_json_dict(payload).attach(tracer=tracer, is_remote=True):
     tracer.info("worker_started")
 ```
 
-Attaching restores the previous context on exit, including exceptional exits. Use `is_remote=True` when errors
+Attaching replaces the current parent and baggage, then restores both on exit, including exceptional exits.
+Use `is_remote=True` when errors
 need their own child log because the attached parent is no longer a writable local span. Ordinary exceptions are
 recorded and re-raised unchanged; cancellation and generator shutdown propagate without an extra error log.
 `attach_sync` and `attach_async` provide the same behavior as decorators.
 
-`tracer.reset_context()` temporarily starts from an empty parent. Decorator equivalents are
+`tracer.reset_context()` temporarily starts from an empty parent and baggage. Decorator equivalents are
 `with_reset_context_sync`, `with_reset_context_async`, `with_reset_context_iter`, `with_reset_context_aiter`,
 `with_reset_context_contextmanager`, and `with_reset_context_acontextmanager`. Reset iterator and context-manager
 wrappers isolate producer/setup/teardown work while preserving the consumer's context.

@@ -1,5 +1,7 @@
 #!/usr/bin/env -S uv run --active --with tomlkit python
 
+"""Initialize a project from the devkit template."""
+
 import keyword
 import pathlib
 import re

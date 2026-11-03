@@ -1,3 +1,5 @@
+"""Check module and function size ceilings."""
+
 import ast
 import pathlib
 from typing import Final

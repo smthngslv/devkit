@@ -1,3 +1,5 @@
+"""Check annotations on local bindings and method targets."""
+
 import ast
 import pathlib
 import re

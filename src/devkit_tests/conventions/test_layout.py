@@ -1,3 +1,5 @@
+"""Check blank lines at dedents and split-string spacing."""
+
 import io
 import pathlib
 import tokenize

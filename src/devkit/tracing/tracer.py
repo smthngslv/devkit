@@ -1,63 +1,72 @@
+"""Logfire-backed logs, spans, and context-aware decorators."""
+
 import annotationlib
 import contextlib
 import functools
 import inspect
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Generator, Iterator, Mapping, Set
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Coroutine,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Set,
+)
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from pathlib import Path
 from types import FrameType
 from typing import Any, ClassVar, Final, Literal, Self, cast, final
 
-import logfire as logfire_sdk
-import logfire._internal.main as logfire_main
-import opentelemetry.sdk.trace as sdk_trace
+import logfire
+import logfire._internal.main as logfire_sdk_main
+import opentelemetry.sdk.trace as otel_sdk_trace
 import opentelemetry.trace as otel_trace
-from logfire import Logfire
 
-from devkit.tracing import context as tracing_context, level as tracing_level
+from devkit.tracing.context import Context
+from devkit.tracing.level import Level
 
 __all__: Final[tuple[str, ...]] = ("Tracer",)
-
-logfire_sdk.add_non_user_code_prefix(str(Path(__file__).parent))
 
 
 @final
 class Tracer:
-    __slots__: ClassVar[tuple[str, ...]] = ("__scope", "logfire")
+    """Emit Logfire events under a scope with optional inherited tags."""
 
-    def __init__(
-        self: Self,
-        scope: str,
-        /,
-        *,
-        tags: Set[str] | None = None,
-        logfire: Logfire = logfire_sdk.DEFAULT_LOGFIRE_INSTANCE,
-    ) -> None:
+    __slots__: ClassVar[tuple[str, ...]] = ("__scope", "__tags", "logfire_instance")
+
+    def __init__(self: Self, scope: str, /, *, tags: Iterable[str] | None = None) -> None:
         self.__scope: Final[str] = scope
-        self.logfire: Final[Logfire] = logfire.with_settings(
-            tags=tuple[str, ...](tags) if tags is not None else (), custom_scope_suffix=scope
+        self.__tags: Final[tuple[str, ...]] = tuple[str, ...](tags) if tags is not None else ()
+        self.logfire_instance: Final[logfire.Logfire] = logfire.DEFAULT_LOGFIRE_INSTANCE.with_settings(
+            tags=self.__tags, custom_scope_suffix=scope
         )
 
     @property
     def level(self: Self, /) -> int:
-        return self.logfire.config.min_level
+        """Return the configured minimum severity."""
+        return self.logfire_instance.config.min_level
 
-    def set_attributes_to_current_span(self: Self, level: tracing_level.Level, /, **attributes: Any) -> None:
+    def set_attributes_to_current_span(self: Self, level: Level, /, **attributes: Any) -> None:
+        """Add structured attributes to the active span when the level is enabled."""
         if self.level <= level:
             # Logfire has no public helper for structured attributes on the active OpenTelemetry span.
             # Keep its JSON schema alongside the values; covered by the SDK integration tests.
             # TODO: Replace when https://github.com/pydantic/logfire/issues/674 exposes a public API.
-            logfire_main.set_user_attributes_on_raw_span(
-                cast("sdk_trace.Span", otel_trace.get_current_span()), attributes
+            logfire_sdk_main.set_user_attributes_on_raw_span(
+                cast("otel_sdk_trace.Span", otel_trace.get_current_span()), attributes
             )
 
     def get_child(self: Self, scope: str, /, *, tags: Set[str] | None = None) -> Self:
+        """Create a nested scope that inherits this tracer's tags."""
         # Scope is not propagated by logfire, it has to be done manually.
-        return self.__class__(f"{self.__scope}.{scope}", tags=tags, logfire=self.logfire)
+        return self.__class__(f"{self.__scope}.{scope}", tags=(*self.__tags, *(tags if tags is not None else ())))
 
     def log(
         self: Self,
-        level: tracing_level.Level,
+        level: Level,
         name: str | None = None,
         /,
         *,
@@ -68,8 +77,9 @@ class Tracer:
         exception_: BaseException | None = None,
         **attributes: Any,
     ) -> None:
+        """Emit a structured log or a message span with an optional exception."""
         if message_ is not None:
-            span: logfire_sdk.LogfireSpan
+            span: logfire.LogfireSpan
             with (
                 self.reset_context() if should_reset_context_ else contextlib.nullcontext(),
                 self.span(
@@ -78,7 +88,7 @@ class Tracer:
             ):
                 if exception_ is not None:
                     span.record_exception(exception_)
-                    if level >= tracing_level.Level.ERROR:
+                    if level >= Level.ERROR:
                         otel_trace.get_current_span().set_status(otel_trace.StatusCode.ERROR, str(exception_))
 
                 return
@@ -89,7 +99,7 @@ class Tracer:
         caller_name: Final[str] = self.__get_caller_fully_qualified_name(stack_depth_ + 1)
         name = f"{caller_name}.{name}" if name is not None else caller_name
         with self.reset_context() if should_reset_context_ else contextlib.nullcontext():
-            self.logfire.log(int(level), name, attributes, tuple[str, ...](tags_), exception_)
+            self.logfire_instance.log(int(level), name, attributes, tuple[str, ...](tags_), exception_)
 
     def trace(
         self: Self,
@@ -103,8 +113,9 @@ class Tracer:
         exception_: BaseException | None = None,
         **attributes: Any,
     ) -> None:
+        """Emit a trace-level log."""
         return self.log(
-            tracing_level.Level.TRACE,
+            Level.TRACE,
             name,
             stack_depth_=stack_depth_ + 1,
             should_reset_context_=should_reset_context_,
@@ -126,8 +137,9 @@ class Tracer:
         exception_: BaseException | None = None,
         **attributes: Any,
     ) -> None:
+        """Emit a debug-level log."""
         return self.log(
-            tracing_level.Level.DEBUG,
+            Level.DEBUG,
             name,
             stack_depth_=stack_depth_ + 1,
             should_reset_context_=should_reset_context_,
@@ -149,8 +161,9 @@ class Tracer:
         exception_: BaseException | None = None,
         **attributes: Any,
     ) -> None:
+        """Emit an info-level log."""
         return self.log(
-            tracing_level.Level.INFO,
+            Level.INFO,
             name,
             stack_depth_=stack_depth_ + 1,
             should_reset_context_=should_reset_context_,
@@ -172,8 +185,9 @@ class Tracer:
         exception_: BaseException | None = None,
         **attributes: Any,
     ) -> None:
+        """Emit a notice-level log."""
         return self.log(
-            tracing_level.Level.NOTICE,
+            Level.NOTICE,
             name,
             stack_depth_=stack_depth_ + 1,
             should_reset_context_=should_reset_context_,
@@ -195,8 +209,9 @@ class Tracer:
         exception_: BaseException | None = None,
         **attributes: Any,
     ) -> None:
+        """Emit a warning-level log."""
         return self.log(
-            tracing_level.Level.WARNING,
+            Level.WARNING,
             name,
             stack_depth_=stack_depth_ + 1,
             should_reset_context_=should_reset_context_,
@@ -218,8 +233,9 @@ class Tracer:
         exception_: BaseException | None = None,
         **attributes: Any,
     ) -> None:
+        """Emit an error-level log."""
         return self.log(
-            tracing_level.Level.ERROR,
+            Level.ERROR,
             name,
             stack_depth_=stack_depth_ + 1,
             should_reset_context_=should_reset_context_,
@@ -241,8 +257,9 @@ class Tracer:
         exception_: BaseException | None = None,
         **attributes: Any,
     ) -> None:
+        """Emit a fatal-level log."""
         return self.log(
-            tracing_level.Level.FATAL,
+            Level.FATAL,
             name,
             stack_depth_=stack_depth_ + 1,
             should_reset_context_=should_reset_context_,
@@ -254,7 +271,7 @@ class Tracer:
 
     def span(
         self: Self,
-        level: tracing_level.Level,
+        level: Level,
         name: str | None = None,
         /,
         *,
@@ -263,7 +280,11 @@ class Tracer:
         tags_: Set[str] | None = None,
         should_keep_open_: bool = True,
         **attributes: Any,
-    ) -> AbstractContextManager[logfire_sdk.LogfireSpan]:
+    ) -> AbstractContextManager[logfire.LogfireSpan]:
+        """Create a span named for its call site.
+
+        With ``should_keep_open_=False``, close the span before the block runs while preserving its parent context.
+        """
         caller_name: Final[str] = self.__get_caller_fully_qualified_name(stack_depth_ + 1)
         name = f"{caller_name}.{name}" if name is not None else caller_name
 
@@ -273,16 +294,16 @@ class Tracer:
         if tags_ is None:
             tags_ = set[str]()
 
-        span: Final[logfire_sdk.LogfireSpan] = self.logfire.span(
+        span: Final[logfire.LogfireSpan] = self.logfire_instance.span(
             message_, _tags=tuple[str, ...](tags_), _span_name=name, _level=level.label, **attributes
         )
         if should_keep_open_:
             return span
 
         @contextlib.contextmanager
-        def wrapper() -> Generator[logfire_sdk.LogfireSpan]:
+        def wrapper() -> Generator[logfire.LogfireSpan]:
             with span:
-                context: Final[tracing_context.Context] = tracing_context.Context.get_current()
+                context: Final[Context] = Context.get_current()
 
             with context.attach(tracer=self, is_remote=True):
                 yield span
@@ -290,11 +311,12 @@ class Tracer:
         return wrapper()
 
     def reset_context(self: Self, /) -> AbstractContextManager[None]:
-        return tracing_context.Context().attach(tracer=self)
+        """Clear the trace parent and baggage for a block."""
+        return Context().attach(tracer=self)
 
     def with_span_async[**P, R](
         self: Self,
-        level: tracing_level.Level,
+        level: Level,
         /,
         *,
         name_: str | None = None,
@@ -305,6 +327,7 @@ class Tracer:
         should_keep_open_: bool = True,
         **attributes: Any,
     ) -> Callable[[Callable[P, Coroutine[None, None, R]]], Callable[P, Coroutine[None, None, R]]]:
+        """Decorate an async function with a span and optional argument or return capture."""
         # A short-lived span is closed before the body runs, so the return value cannot be attached to it.
         if should_include_return_ and not should_keep_open_:
             message: Final[str] = "`should_include_return_` is incompatible with `should_keep_open_=False`."
@@ -340,7 +363,7 @@ class Tracer:
                     else {}
                 )
 
-                span: Final[logfire_sdk.LogfireSpan] = self.logfire.span(
+                span: Final[logfire.LogfireSpan] = self.logfire_instance.span(
                     span_message,
                     _tags=tuple[str, ...](tags_),
                     _span_name=span_name,
@@ -352,7 +375,7 @@ class Tracer:
                 # immediately while the wrapped work still nests under it.
                 if not should_keep_open_:
                     with span:
-                        context: Final[tracing_context.Context] = tracing_context.Context.get_current()
+                        context: Final[Context] = Context.get_current()
 
                     with context.attach(tracer=self, is_remote=True):
                         return await function(*args, **kwargs)
@@ -371,7 +394,7 @@ class Tracer:
 
     def with_span_sync[**P, R](
         self: Self,
-        level: tracing_level.Level,
+        level: Level,
         /,
         *,
         name_: str | None = None,
@@ -382,6 +405,7 @@ class Tracer:
         should_keep_open_: bool = True,
         **attributes: Any,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
+        """Decorate a sync function with a span and optional argument or return capture."""
         # A short-lived span is closed before the body runs, so the return value cannot be attached to it.
         if should_include_return_ and not should_keep_open_:
             message: Final[str] = "`should_include_return_` is incompatible with `should_keep_open_=False`."
@@ -417,7 +441,7 @@ class Tracer:
                     else {}
                 )
 
-                span: Final[logfire_sdk.LogfireSpan] = self.logfire.span(
+                span: Final[logfire.LogfireSpan] = self.logfire_instance.span(
                     span_message,
                     _tags=tuple[str, ...](tags_),
                     _span_name=span_name,
@@ -429,7 +453,7 @@ class Tracer:
                 # immediately while the wrapped work still nests under it.
                 if not should_keep_open_:
                     with span:
-                        context: Final[tracing_context.Context] = tracing_context.Context.get_current()
+                        context: Final[Context] = Context.get_current()
 
                     with context.attach(tracer=self, is_remote=True):
                         return function(*args, **kwargs)
@@ -448,7 +472,7 @@ class Tracer:
 
     def with_span_aiter[**P, Y](
         self: Self,
-        level: tracing_level.Level,
+        level: Level,
         /,
         *,
         name_: str | None = None,
@@ -458,6 +482,8 @@ class Tracer:
         should_include_consumer_: bool = False,
         **attributes: Any,
     ) -> Callable[[Callable[P, AsyncIterator[Y]]], Callable[P, AsyncGenerator[Y]]]:
+        """Reattach the span context while an async iterator produces each item."""
+
         def decorator(function: Callable[P, AsyncIterator[Y]]) -> Callable[P, AsyncGenerator[Y]]:
             # Reuse the span decorator to open the span, capture its context, and close it at once -- an iterator
             # is long-lived, so the span is only re-attached while the iterator itself produces items.
@@ -466,12 +492,12 @@ class Tracer:
             )
             @functools.wraps(function)
             # The parameters exist only to mirror the wrapped signature so `include_args_` can bind them.
-            def get_span_context(*args: P.args, **kwargs: P.kwargs) -> tracing_context.Context:  # noqa: ARG001
-                return tracing_context.Context.get_current()
+            def get_span_context(*args: P.args, **kwargs: P.kwargs) -> Context:  # noqa: ARG001
+                return Context.get_current()
 
             @functools.wraps(function)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[Y]:
-                span_context: Final[tracing_context.Context] = get_span_context(*args, **kwargs)
+                span_context: Final[Context] = get_span_context(*args, **kwargs)
                 return self.__iterate_async(
                     function(*args, **kwargs),
                     reattach=functools.partial(span_context.attach, tracer=self, is_remote=True),
@@ -484,7 +510,7 @@ class Tracer:
 
     def with_span_iter[**P, Y](
         self: Self,
-        level: tracing_level.Level,
+        level: Level,
         /,
         *,
         name_: str | None = None,
@@ -494,6 +520,8 @@ class Tracer:
         should_include_consumer_: bool = False,
         **attributes: Any,
     ) -> Callable[[Callable[P, Iterator[Y]]], Callable[P, Generator[Y]]]:
+        """Reattach the span context while an iterator produces each item."""
+
         def decorator(function: Callable[P, Iterator[Y]]) -> Callable[P, Generator[Y]]:
             # Reuse the span decorator to open the span, capture its context, and close it at once -- an iterator
             # is long-lived, so the span is only re-attached while the iterator itself produces items.
@@ -502,12 +530,12 @@ class Tracer:
             )
             @functools.wraps(function)
             # The parameters exist only to mirror the wrapped signature so `include_args_` can bind them.
-            def get_span_context(*args: P.args, **kwargs: P.kwargs) -> tracing_context.Context:  # noqa: ARG001
-                return tracing_context.Context.get_current()
+            def get_span_context(*args: P.args, **kwargs: P.kwargs) -> Context:  # noqa: ARG001
+                return Context.get_current()
 
             @functools.wraps(function)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> Generator[Y]:
-                span_context: Final[tracing_context.Context] = get_span_context(*args, **kwargs)
+                span_context: Final[Context] = get_span_context(*args, **kwargs)
                 return self.__iterate(
                     function(*args, **kwargs),
                     reattach=functools.partial(span_context.attach, tracer=self, is_remote=True),
@@ -520,7 +548,7 @@ class Tracer:
 
     def with_span_acontextmanager[**P, Y](
         self: Self,
-        level: tracing_level.Level,
+        level: Level,
         /,
         *,
         name_: str | None = None,
@@ -529,6 +557,8 @@ class Tracer:
         include_args_: bool | Set[str] | Mapping[str, str] = False,
         **attributes: Any,
     ) -> Callable[[Callable[P, AsyncGenerator[Y]]], Callable[P, AbstractAsyncContextManager[Y]]]:
+        """Propagate span context through async setup and teardown."""
+
         def decorator(function: Callable[P, AsyncGenerator[Y]]) -> Callable[P, AbstractAsyncContextManager[Y]]:
             # Reuse the span decorator to open the span, capture its context, and close it at once -- a context
             # manager is long-lived, so the span is only re-attached while setup and teardown run, not while the
@@ -538,13 +568,13 @@ class Tracer:
             )
             @functools.wraps(function)
             # The parameters exist only to mirror the wrapped signature so `include_args_` can bind them.
-            def get_span_context(*args: P.args, **kwargs: P.kwargs) -> tracing_context.Context:  # noqa: ARG001
-                return tracing_context.Context.get_current()
+            def get_span_context(*args: P.args, **kwargs: P.kwargs) -> Context:  # noqa: ARG001
+                return Context.get_current()
 
             @contextlib.asynccontextmanager
             @functools.wraps(function)
             async def wrapper(*args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[Y]:
-                span_context: Final[tracing_context.Context] = get_span_context(*args, **kwargs)
+                span_context: Final[Context] = get_span_context(*args, **kwargs)
                 value: Y
                 async with self.__drive_async_contextmanager(
                     function(*args, **kwargs),
@@ -558,7 +588,7 @@ class Tracer:
 
     def with_span_contextmanager[**P, Y](
         self: Self,
-        level: tracing_level.Level,
+        level: Level,
         /,
         *,
         name_: str | None = None,
@@ -567,6 +597,8 @@ class Tracer:
         include_args_: bool | Set[str] | Mapping[str, str] = False,
         **attributes: Any,
     ) -> Callable[[Callable[P, Generator[Y]]], Callable[P, AbstractContextManager[Y]]]:
+        """Propagate span context through setup and teardown."""
+
         def decorator(function: Callable[P, Generator[Y]]) -> Callable[P, AbstractContextManager[Y]]:
             # Reuse the span decorator to open the span, capture its context, and close it at once -- a context
             # manager is long-lived, so the span is only re-attached while setup and teardown run, not while the
@@ -576,13 +608,13 @@ class Tracer:
             )
             @functools.wraps(function)
             # The parameters exist only to mirror the wrapped signature so `include_args_` can bind them.
-            def get_span_context(*args: P.args, **kwargs: P.kwargs) -> tracing_context.Context:  # noqa: ARG001
-                return tracing_context.Context.get_current()
+            def get_span_context(*args: P.args, **kwargs: P.kwargs) -> Context:  # noqa: ARG001
+                return Context.get_current()
 
             @contextlib.contextmanager
             @functools.wraps(function)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> Generator[Y]:
-                span_context: Final[tracing_context.Context] = get_span_context(*args, **kwargs)
+                span_context: Final[Context] = get_span_context(*args, **kwargs)
                 value: Y
                 with self.__drive_contextmanager(
                     function(*args, **kwargs),
@@ -597,6 +629,8 @@ class Tracer:
     def with_reset_context_async[**P, R](
         self: Self, /, function: Callable[P, Coroutine[None, None, R]]
     ) -> Callable[P, Coroutine[None, None, R]]:
+        """Run an async function with an empty trace context."""
+
         @functools.wraps(function)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             with self.reset_context():
@@ -605,6 +639,8 @@ class Tracer:
         return wrapper
 
     def with_reset_context_sync[**P, R](self: Self, /, function: Callable[P, R]) -> Callable[P, R]:
+        """Run a sync function with an empty trace context."""
+
         @functools.wraps(function)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             with self.reset_context():
@@ -615,6 +651,8 @@ class Tracer:
     def with_reset_context_aiter[**P, Y](
         self: Self, /, function: Callable[P, AsyncIterator[Y]]
     ) -> Callable[P, AsyncGenerator[Y]]:
+        """Run async iterator production with an empty trace context."""
+
         @functools.wraps(function)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[Y]:
             return self.__iterate_async(function(*args, **kwargs), reattach=self.reset_context)
@@ -622,6 +660,8 @@ class Tracer:
         return wrapper
 
     def with_reset_context_iter[**P, Y](self: Self, /, function: Callable[P, Iterator[Y]]) -> Callable[P, Generator[Y]]:
+        """Run iterator production with an empty trace context."""
+
         @functools.wraps(function)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> Generator[Y]:
             return self.__iterate(function(*args, **kwargs), reattach=self.reset_context)
@@ -631,6 +671,8 @@ class Tracer:
     def with_reset_context_acontextmanager[**P, Y](
         self: Self, /, function: Callable[P, AsyncGenerator[Y]]
     ) -> Callable[P, AbstractAsyncContextManager[Y]]:
+        """Run async context-manager setup and teardown with an empty trace context."""
+
         @contextlib.asynccontextmanager
         @functools.wraps(function)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[Y]:
@@ -645,6 +687,8 @@ class Tracer:
     def with_reset_context_contextmanager[**P, Y](
         self: Self, /, function: Callable[P, Generator[Y]]
     ) -> Callable[P, AbstractContextManager[Y]]:
+        """Run context-manager setup and teardown with an empty trace context."""
+
         @contextlib.contextmanager
         @functools.wraps(function)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> Generator[Y]:
@@ -658,7 +702,7 @@ class Tracer:
     def __get_code_attributes(function: Callable[..., Any]) -> dict[str, Any]:
         function = inspect.unwrap(function)
         return {
-            "code.filepath": Path(inspect.getfile(function)).relative_to(Path.cwd(), walk_up=True).as_posix(),
+            "code.filepath": (Path(inspect.getfile(function)).relative_to(Path.cwd(), walk_up=True).as_posix()),
             "code.function": function.__qualname__,
             "code.lineno": getattr(getattr(function, "__code__", None), "co_firstlineno", None),
         }
@@ -677,6 +721,7 @@ class Tracer:
 
     @staticmethod
     def __get_caller_fully_qualified_name(depth: int) -> str:
+        """Find the call site after skipping wrapper frames."""
         frame: FrameType | None = inspect.currentframe()
         _: int
         for _ in range(depth + 1):
@@ -718,6 +763,7 @@ class Tracer:
         *args: Any,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Bind call arguments and select values for span attributes."""
         bound: Final[inspect.BoundArguments] = signature.bind(*args, **kwargs)
         bound.apply_defaults()
 
@@ -733,6 +779,7 @@ class Tracer:
         reattach: Callable[[], AbstractContextManager[None]],
         should_include_consumer: bool = False,
     ) -> Generator[Y]:
+        """Resume and close an iterator under the supplied context."""
         try:
             while True:
                 with reattach():
@@ -759,6 +806,8 @@ class Tracer:
     def __drive_contextmanager[Y](
         generator: Generator[Y], *, reattach: Callable[[], AbstractContextManager[None]]
     ) -> Generator[Y]:
+        """Run setup and teardown under context while the caller body stays outside."""
+
         def get_generator() -> Generator[Y]:
             return generator
 
@@ -789,6 +838,7 @@ class Tracer:
         reattach: Callable[[], AbstractContextManager[None]],
         should_include_consumer: bool = False,
     ) -> AsyncGenerator[Y]:
+        """Resume and close an async iterator under the supplied context."""
         try:
             while True:
                 with reattach():
@@ -814,10 +864,12 @@ class Tracer:
     async def __drive_async_contextmanager[Y](
         generator: AsyncGenerator[Y], *, reattach: Callable[[], AbstractContextManager[None]]
     ) -> AsyncGenerator[Y]:
+        """Run async setup and teardown under context while the caller body stays outside."""
+
         def get_generator() -> AsyncGenerator[Y]:
             return generator
 
-        manager: Final[contextlib.AbstractAsyncContextManager[Y]] = contextlib.asynccontextmanager(get_generator)()
+        manager: Final[AbstractAsyncContextManager[Y]] = contextlib.asynccontextmanager(get_generator)()
         with reattach():
             value: Final[Y] = await manager.__aenter__()
 

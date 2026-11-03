@@ -1,3 +1,5 @@
+"""Exercise tracing context, logs, spans, and decorators."""
+
 import asyncio
 import contextlib
 import inspect
@@ -6,11 +8,12 @@ from collections.abc import AsyncGenerator, Generator, Iterator
 from typing import Final
 
 import logfire
-import opentelemetry.sdk.trace as sdk_trace
-import opentelemetry.sdk.trace.export as trace_export
-import opentelemetry.sdk.trace.export.in_memory_span_exporter as memory_export
+import msgpack
+import opentelemetry.sdk.trace as otel_sdk_trace
+import opentelemetry.sdk.trace.export as otel_sdk_trace_export
 import opentelemetry.trace as otel_trace
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from devkit import tracing
 
@@ -20,41 +23,51 @@ _PARENT: Final[str] = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
 
 
 @pytest.fixture
-def exporter() -> memory_export.InMemorySpanExporter:
-    return memory_export.InMemorySpanExporter()
+def exporter() -> InMemorySpanExporter:
+    """Collect spans in memory for tracing assertions."""
+    return InMemorySpanExporter()
 
 
 @pytest.fixture
-def tracer(exporter: memory_export.InMemorySpanExporter) -> Iterator[tracing.Tracer]:
+def tracer(exporter: InMemorySpanExporter) -> Iterator[tracing.Tracer]:
+    """Configure a local tracer and shut down its Logfire instance after use."""
     instance: Final[logfire.Logfire] = logfire.configure(
-        local=True,
+        local=False,
         send_to_logfire=False,
         console=False,
         metrics=False,
         inspect_arguments=False,
         min_level=0,
-        additional_span_processors=[trace_export.SimpleSpanProcessor(exporter)],
+        additional_span_processors=[otel_sdk_trace_export.SimpleSpanProcessor(exporter)],
     )
     try:
-        yield tracing.Tracer("tests", logfire=instance)
+        yield tracing.Tracer("tests")
 
     finally:
         instance.shutdown()
 
 
 @pytest.mark.parametrize("parent", [None, _PARENT])
-def test_context_round_trips(parent: str | None) -> None:
-    """Preserve empty and populated parents through JSON and compact bytes for transport between workers."""
-    context: Final[tracing.Context] = tracing.Context(parent=parent)
-    assert tracing.Context.from_bytes(context.to_bytes()).parent == parent
-    assert tracing.Context.from_json_dict(context.to_json_dict()).parent == parent
-    assert context.is_empty is (parent is None)
+@pytest.mark.parametrize("baggage", [{}, {"tenant": "alpha"}])
+def test_context_round_trips(parent: str | None, baggage: dict[str, str]) -> None:
+    """Preserve a trace parent and baggage through both JSON and MessagePack transport."""
+    context: Final[tracing.Context] = tracing.Context(parent=parent, baggage=baggage)
+    json_payload: Final[dict[str, str | dict[str, str]]] = context.to_json_dict()
+    packed: Final[bytes] = context.to_bytes()
+    assert json_payload["baggage"] == baggage
+    assert msgpack.unpackb(packed, raw=False) == json_payload
+    restored: tracing.Context
+    for restored in (tracing.Context.from_bytes(packed), tracing.Context.from_json_dict(json_payload)):
+        assert restored.parent == parent
+        assert restored.baggage == baggage
+
+    assert context.is_empty is (parent is None and len(baggage) == 0)
 
 
-@pytest.mark.parametrize("packed", [b"x", bytes(26), bytes(27)])
+@pytest.mark.parametrize("packed", [b"", b"x", msgpack.packb(42), msgpack.packb(["traceparent"])])
 def test_context_rejects_invalid_bytes(packed: bytes) -> None:
-    """Reject truncated, oversized, and zero-ID parents instead of silently losing trace linkage."""
-    with pytest.raises(ValueError, match="traceparent"):
+    """Reject malformed MessagePack or payloads that are not context mappings."""
+    with pytest.raises((ValueError, TypeError), match="packed"):
         tracing.Context.from_bytes(packed)
 
 
@@ -65,50 +78,68 @@ def test_context_rejects_invalid_json(parent: object) -> None:
         tracing.Context.from_json_dict({"traceparent": parent})
 
 
+@pytest.mark.parametrize("baggage", [42, ["tenant"], {1: "alpha"}, {"tenant": 1}])
+def test_context_rejects_invalid_baggage(baggage: object) -> None:
+    """Reject baggage that is not a string-to-string mapping before it can cross a process boundary."""
+    with pytest.raises(TypeError, match=r"baggage|Baggage"):
+        tracing.Context.from_json_dict({"baggage": baggage})
+
+
 def test_attaching_and_resetting_restore_parent(tracer: tracing.Tracer) -> None:
-    """Restore the caller's parent after nesting, resetting, or raising inside an attached context."""
-    original: Final[str | None] = tracing.Context.get_current().parent
-    context: Final[tracing.Context] = tracing.Context(parent=_PARENT)
-    with context.attach(tracer=tracer):
-        assert tracing.Context.get_current().parent == _PARENT
-        with tracer.reset_context():
-            assert tracing.Context.get_current().is_empty
+    """Attach parent and baggage together, then restore the caller's values after reset or failure."""
+    with logfire.set_baggage(ambient="outer"):
+        original: Final[str | None] = tracing.Context.get_current().parent
+        assert tracing.Context.get_current().baggage == {"ambient": "outer"}
+        context: Final[tracing.Context] = tracing.Context(parent=_PARENT, baggage={"tenant": "inner"})
+        with context.attach(tracer=tracer):
+            assert tracing.Context.get_current().parent == _PARENT
+            assert tracing.Context.get_current().baggage == {"tenant": "inner"}
+            assert logfire.get_baggage() == {"tenant": "inner"}
+            with tracer.reset_context():
+                assert tracing.Context.get_current().is_empty
+                assert logfire.get_baggage() == {}
 
-        assert tracing.Context.get_current().parent == _PARENT
-        message: Final[str] = "failure."
-        with pytest.raises(ValueError, match="failure"), tracer.reset_context():
-            raise ValueError(message)
+            assert tracing.Context.get_current().parent == _PARENT
+            assert logfire.get_baggage() == {"tenant": "inner"}
+            message: Final[str] = "failure."
+            with pytest.raises(ValueError, match="failure"), tracer.reset_context():
+                raise ValueError(message)
 
-        assert tracing.Context.get_current().parent == _PARENT
+            assert tracing.Context.get_current().parent == _PARENT
+            assert logfire.get_baggage() == {"tenant": "inner"}
 
-    assert tracing.Context.get_current().parent == original
+        assert tracing.Context.get_current().parent == original
+        assert logfire.get_baggage() == {"ambient": "outer"}
 
 
 def test_attach_decorators_preserve_result_and_parent(tracer: tracing.Tracer) -> None:
     """Attach a transported parent during sync and async calls and restore the caller afterward."""
-    context: Final[tracing.Context] = tracing.Context(parent=_PARENT)
+    context: Final[tracing.Context] = tracing.Context(parent=_PARENT, baggage={"tenant": "alpha"})
     original: Final[str | None] = tracing.Context.get_current().parent
 
     @context.attach_sync(tracer=tracer)
     def run_sync() -> str | None:
+        assert logfire.get_baggage() == {"tenant": "alpha"}
         return tracing.Context.get_current().parent
 
     @context.attach_async(tracer=tracer)
     async def run_async() -> str | None:
+        assert logfire.get_baggage() == {"tenant": "alpha"}
         return tracing.Context.get_current().parent
 
     assert run_sync() == _PARENT
     assert asyncio.run(run_async()) == _PARENT
     assert tracing.Context.get_current().parent == original
+    assert logfire.get_baggage() == {}
 
 
 @pytest.mark.parametrize("level", list(tracing.Level))
 def test_log_levels_names_and_tags(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter, level: tracing.Level
+    tracer: tracing.Tracer, exporter: InMemorySpanExporter, level: tracing.Level
 ) -> None:
     """Forward every convenience method's level, caller name, tags, and data without application-specific tags."""
     getattr(tracer, level.name.lower())("event", tags_={"custom"}, answer=42)
-    span: Final[sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
+    span: Final[otel_sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
     assert span.name.endswith("test_log_levels_names_and_tags.event")
     assert span.attributes is not None
     assert span.attributes["logfire.level_num"] == level.value
@@ -116,22 +147,22 @@ def test_log_levels_names_and_tags(
     assert span.attributes["answer"] == 42
 
 
-def test_child_scope_and_tags(tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter) -> None:
+def test_child_scope_and_tags(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Keep nested tracer scopes and inherited tags so child events can be filtered by component."""
     child: Final[tracing.Tracer] = tracer.get_child("worker", tags={"worker"}).get_child("task", tags={"task"})
     child.info("event")
-    span: Final[sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
+    span: Final[otel_sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
     assert span.instrumentation_scope is not None
     assert span.instrumentation_scope.name == "logfire.tests.worker.task"
     assert span.attributes is not None
     assert span.attributes["logfire.tags"] == ("worker", "task")
 
 
-def test_message_exception_status(tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter) -> None:
+def test_message_exception_status(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Record an explicit exception and ERROR status when a custom message creates a log span."""
     exception: Final[ValueError] = ValueError("failure")
     tracer.error("failed", message_="Failed {item}", exception_=exception, item="job")
-    span: Final[sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
+    span: Final[otel_sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
     assert span.status.status_code is otel_trace.StatusCode.ERROR
     assert span.attributes is not None
     assert span.attributes["logfire.msg"] == "Failed job"
@@ -139,7 +170,7 @@ def test_message_exception_status(tracer: tracing.Tracer, exporter: memory_expor
     assert span.events[0].attributes["exception.message"] == "failure"
 
 
-def test_reset_log_starts_new_trace(tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter) -> None:
+def test_reset_log_starts_new_trace(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Allow an independent log while retaining the enclosing span for subsequent work."""
     with tracer.span(tracing.Level.INFO, "parent"):
         parent: Final[str | None] = tracing.Context.get_current().parent
@@ -149,9 +180,7 @@ def test_reset_log_starts_new_trace(tracer: tracing.Tracer, exporter: memory_exp
     assert exporter.get_finished_spans()[0].parent is None
 
 
-def test_sync_arguments_return_and_decorator_reuse(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter
-) -> None:
+def test_sync_arguments_return_and_decorator_reuse(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Capture defaults and results; a reused decorator keeps each function's metadata and argument overrides."""
     decorate: Final = tracer.with_span_sync(
         tracing.Level.INFO, include_args_=True, should_include_return_=True, value="static"
@@ -179,9 +208,7 @@ def test_sync_arguments_return_and_decorator_reuse(
     assert spans[1].attributes["return_value"] == 3
 
 
-def test_argument_selection_and_dotted_paths(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter
-) -> None:
+def test_argument_selection_and_dotted_paths(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Select safe fields such as context.parent without recording every argument or the whole object."""
 
     @tracer.with_span_sync(tracing.Level.INFO, include_args_={"parent": "context.parent"})
@@ -228,17 +255,15 @@ def test_invalid_decorator_options_fail_early(tracer: tracing.Tracer, *, is_asyn
             tracer.with_span_sync(tracing.Level.INFO, include_args_={"missing"})(run)
 
 
-def test_current_span_attributes_and_filtering(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter
-) -> None:
+def test_current_span_attributes_and_filtering(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Attach structured values to the current span, including their Logfire JSON schema, and honor min_level."""
     with tracer.span(tracing.Level.INFO, "data"):
         tracer.set_attributes_to_current_span(tracing.Level.INFO, result={"ok": True})
-        tracer.logfire.config.min_level = 11
+        tracer.logfire_instance.config.min_level = 11
         assert tracer.level == 11
         tracer.set_attributes_to_current_span(tracing.Level.INFO, hidden=True)
 
-    span: Final[sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
+    span: Final[otel_sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
     assert span.attributes is not None
     assert json.loads(str(span.attributes["result"])) == {"ok": True}
     assert "result" in json.loads(str(span.attributes["logfire.json_schema"]))["properties"]
@@ -247,7 +272,7 @@ def test_current_span_attributes_and_filtering(
 
 @pytest.mark.parametrize("should_keep_open", [False, True])
 def test_span_lifetime_and_parenting(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter, *, should_keep_open: bool
+    tracer: tracing.Tracer, exporter: InMemorySpanExporter, *, should_keep_open: bool
 ) -> None:
     """Keep child linkage whether a parent stays open or is exported before the work begins."""
     with tracer.span(tracing.Level.INFO, "parent", should_keep_open_=should_keep_open):
@@ -255,8 +280,8 @@ def test_span_lifetime_and_parenting(
         tracer.info("child")
 
     spans: Final = exporter.get_finished_spans()
-    parent: Final[sdk_trace.ReadableSpan] = next(span for span in spans if span.name.endswith(".parent"))
-    child: Final[sdk_trace.ReadableSpan] = next(span for span in spans if span.name.endswith(".child"))
+    parent: Final[otel_sdk_trace.ReadableSpan] = next(span for span in spans if span.name.endswith(".parent"))
+    child: Final[otel_sdk_trace.ReadableSpan] = next(span for span in spans if span.name.endswith(".child"))
     assert parent.context is not None
     assert child.parent is not None
     assert child.parent.span_id == parent.context.span_id
@@ -264,7 +289,7 @@ def test_span_lifetime_and_parenting(
 
 @pytest.mark.parametrize("should_keep_open", [False, True])
 def test_sync_decorator_failure(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter, *, should_keep_open: bool
+    tracer: tracing.Tracer, exporter: InMemorySpanExporter, *, should_keep_open: bool
 ) -> None:
     """Propagate the same exception and record it even when the decorator's parent span has already ended."""
     exception: Final[ValueError] = ValueError("failure")
@@ -281,9 +306,7 @@ def test_sync_decorator_failure(
     assert any(len(span.events) != 0 for span in exporter.get_finished_spans())
 
 
-def test_async_results_parenting_and_failure(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter
-) -> None:
+def test_async_results_parenting_and_failure(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Keep independent parent spans across interleaved awaits and capture async arguments, returns, and errors."""
 
     @tracer.with_span_async(tracing.Level.INFO, include_args_=True, should_include_return_=True)
@@ -309,7 +332,7 @@ def test_async_results_parenting_and_failure(
     parents: Final = [span for span in spans if span.name.endswith(".run")]
     children: Final = [span for span in spans if span.name.endswith(".child")]
     assert len(parents) == len(children) == 2
-    parent: sdk_trace.ReadableSpan
+    parent: otel_sdk_trace.ReadableSpan
     for parent in parents:
         assert parent.attributes is not None
         assert parent.attributes["value"] == parent.attributes["return_value"]
@@ -440,7 +463,7 @@ def test_iterator_consumer_option(tracer: tracing.Tracer, *, should_include_cons
 @pytest.mark.parametrize("should_reset", [False, True])
 @pytest.mark.parametrize("should_suppress", [False, True])
 def test_contextmanager_teardown_and_suppression(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter, *, should_reset: bool, should_suppress: bool
+    tracer: tracing.Tracer, exporter: InMemorySpanExporter, *, should_reset: bool, should_suppress: bool
 ) -> None:
     """Run setup and teardown under the same context while honoring generator-based exception suppression."""
     parents: Final[list[str | None]] = []
@@ -485,7 +508,7 @@ def test_contextmanager_teardown_and_suppression(
 @pytest.mark.parametrize("should_reset", [False, True])
 @pytest.mark.parametrize("should_suppress", [False, True])
 def test_async_contextmanager_teardown_and_suppression(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter, *, should_reset: bool, should_suppress: bool
+    tracer: tracing.Tracer, exporter: InMemorySpanExporter, *, should_reset: bool, should_suppress: bool
 ) -> None:
     """Preserve async setup and teardown contexts and propagate or suppress the consumer's original exception."""
     parents: Final[list[str | None]] = []
@@ -610,7 +633,7 @@ def test_async_iterator_consumer_option(tracer: tracing.Tracer, *, should_includ
     asyncio.run(exercise())
 
 
-def test_iterator_failure_is_recorded(tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter) -> None:
+def test_iterator_failure_is_recorded(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Record failures raised after yielding, even though the iterator's parent span was already exported."""
 
     @tracer.with_span_iter(tracing.Level.INFO)
@@ -631,9 +654,7 @@ def test_iterator_failure_is_recorded(tracer: tracing.Tracer, exporter: memory_e
     assert spans[-1].parent.span_id == spans[0].context.span_id
 
 
-def test_async_iterator_failure_is_recorded(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter
-) -> None:
+def test_async_iterator_failure_is_recorded(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Record async producer failures under their ended parent and propagate the original failure to the consumer."""
 
     @tracer.with_span_aiter(tracing.Level.INFO)
@@ -656,9 +677,7 @@ def test_async_iterator_failure_is_recorded(
     assert spans[-1].parent.span_id == spans[0].context.span_id
 
 
-def test_contextmanager_normal_exit_and_code_location(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter
-) -> None:
+def test_contextmanager_normal_exit_and_code_location(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Run normal teardown and report the user's generator location instead of the tracing wrapper's source."""
     closed: Final[list[bool]] = []
 
@@ -669,7 +688,7 @@ def test_contextmanager_normal_exit_and_code_location(
     with tracer.with_span_contextmanager(tracing.Level.INFO)(resource)():
         pass
 
-    span: Final[sdk_trace.ReadableSpan] = exporter.get_finished_spans()[0]
+    span: Final[otel_sdk_trace.ReadableSpan] = exporter.get_finished_spans()[0]
     assert span.attributes is not None
     assert span.attributes["code.lineno"] == resource.__code__.co_firstlineno
     assert span.attributes["code.filepath"] == "src/devkit_tests/test_tracing.py"
@@ -694,9 +713,7 @@ def test_async_contextmanager_normal_exit(tracer: tracing.Tracer) -> None:
     asyncio.run(exercise())
 
 
-def test_remote_failure_preserves_traceback(
-    tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter
-) -> None:
+def test_remote_failure_preserves_traceback(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Record a failure under its transported parent while keeping the original exception and traceback intact."""
     exception: Final[ValueError] = ValueError("failure")
     context: Final[tracing.Context] = tracing.Context(parent=_PARENT)
@@ -711,12 +728,12 @@ def test_remote_failure_preserves_traceback(
 
     assert caught.value is exception
     assert caught.traceback[-1].name == "fail"
-    span: Final[sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
+    span: Final[otel_sdk_trace.ReadableSpan] = exporter.get_finished_spans()[-1]
     assert span.parent is not None
     assert span.parent.span_id == int(_PARENT[36:52], 16)
 
 
-def test_async_decorator_reuse(tracer: tracing.Tracer, exporter: memory_export.InMemorySpanExporter) -> None:
+def test_async_decorator_reuse(tracer: tracing.Tracer, exporter: InMemorySpanExporter) -> None:
     """Keep function-specific source data and argument overrides when one async decorator wraps multiple functions."""
     decorate: Final = tracer.with_span_async(tracing.Level.INFO, include_args_=True, value="static")
 

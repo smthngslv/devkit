@@ -1,3 +1,5 @@
+"""Check method receivers and positional-only markers."""
+
 import ast
 import pathlib
 from collections.abc import Iterator, Set as AbstractSet
@@ -37,7 +39,7 @@ def test_the_receiver_of_a_method_is_typed(path: pathlib.Path) -> None:
             continue
 
         actual: str | None = None if received.annotation is None else ast.unparse(received.annotation)
-        if actual != expected:
+        if actual != expected and not _is_specialized_receiver(node, method=method, received=received):
             offenders.append(
                 f"  {node.name}.{method.name} (line {method.lineno}) types `{received.arg}` as "
                 f"{actual}, expected {expected}"
@@ -133,3 +135,21 @@ def _get_expected_receiver(node: ast.ClassDef, *, method: ast.FunctionDef | ast.
 def _get_receiver(method: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.arg | None:
     positional: Final[list[ast.arg]] = [*method.args.posonlyargs, *method.args.args]
     return positional[0] if len(positional) > 0 else None
+
+
+def _is_specialized_receiver(
+    node: ast.ClassDef, *, method: ast.FunctionDef | ast.AsyncFunctionDef, received: ast.arg
+) -> bool:
+    # A generic type-state method can restrict itself to one mode, as Session[TX].commit does.
+    if len(node.type_params) == 0 or received.annotation is None:
+        return False
+
+    if "classmethod" in source.get_decorator_names(method) or method.name in _IMPLICIT_CLASS_METHODS:
+        return False
+
+    annotation: Final[ast.expr] = received.annotation
+    return (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id == node.name
+    )

@@ -1,3 +1,5 @@
+"""Check comment placement, punctuation, and suppression reasons."""
+
 import pathlib
 import re
 from collections.abc import Sequence

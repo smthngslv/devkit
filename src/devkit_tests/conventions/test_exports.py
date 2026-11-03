@@ -1,3 +1,5 @@
+"""Check explicit module export declarations."""
+
 import ast
 import pathlib
 from typing import Final
@@ -13,12 +15,12 @@ __all__: Final[tuple[str, ...]] = ("test_every_module_declares_its_exports",)
 def test_every_module_declares_its_exports(path: pathlib.Path) -> None:
     """Require each nonempty module to declare its public exports.
 
-    An empty `__init__.py` is allowed; other modules need `__all__`, even when it
-    is an empty tuple. This check verifies the declaration exists, not that every
+    A package marker with only a docstring is allowed; other modules need `__all__`,
+    even when it is an empty tuple. This checks the declaration, not that every
     entry matches all consumers. Export correctness remains a review concern.
     """
     tree: Final[ast.Module] = source.parse(path)
-    if path.name == "__init__.py" and len(tree.body) == 0:
+    if path.name == "__init__.py" and (len(tree.body) == 0 or (len(tree.body) == 1 and ast.get_docstring(tree))):
         return
 
     assert "__all__" in source.get_module_level_names(tree), (

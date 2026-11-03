@@ -1,3 +1,5 @@
+"""AST and token helpers shared by the convention checks."""
+
 import ast
 import dataclasses
 import io
@@ -56,10 +58,7 @@ TESTS_ROOT: Final[pathlib.Path] = pathlib.Path(devkit_tests.__file__).parent
 # What both sit in, and what every path in a failure message is reported relative to.
 SOURCE_ROOT: Final[pathlib.Path] = TESTS_ROOT.parent
 
-# The operator scripts, which the src layout keeps out of the wheel. Walked like the two packages: ruff
-# and mypy already read them, and a rule that stops at the package boundary is a rule the next module
-# written outside it will break -- which is what happened to the module privacy rule, in a script
-# nothing was checking.
+# The operator scripts sit outside the wheel but follow the same conventions as the packages.
 SCRIPTS_ROOT: Final[pathlib.Path] = SOURCE_ROOT.parent / "scripts"
 
 # The pragmas a tool reads positionally, and therefore the only comments allowed to sit inline. Spelled
@@ -84,10 +83,12 @@ _IGNORED_TOKENS: Final[frozenset[int]] = frozenset(
 def get_module_paths() -> list[pathlib.Path]:
     # No annotation on `root`: a comprehension owns its own scope, so one declared out here would be dead
     # (the annotation rule asks for the annotation once per scope, and this is not that scope).
+    """List Python files checked in the package, tests, and scripts."""
     return sorted(path for root in (PACKAGE_ROOT, TESTS_ROOT, SCRIPTS_ROOT) for path in root.rglob("*.py"))
 
 
 def get_module_id(path: pathlib.Path) -> str:
+    """Return a stable path for a source diagnostic."""
     if path.is_relative_to(SOURCE_ROOT):
         return str(path.relative_to(SOURCE_ROOT))
 
@@ -102,14 +103,17 @@ def get_module_id(path: pathlib.Path) -> str:
 
 
 def read(path: pathlib.Path) -> str:
+    """Read a source file as text."""
     return path.read_text()
 
 
 def parse(path: pathlib.Path) -> ast.Module:
+    """Parse a source file into a Python syntax tree."""
     return ast.parse(path.read_text())
 
 
 def get_bound_names(target: ast.expr) -> set[str]:
+    """Collect simple names bound by an assignment target."""
     if isinstance(target, ast.Name):
         return {target.id}
 
@@ -123,6 +127,7 @@ def get_bound_names(target: ast.expr) -> set[str]:
 
 
 def get_defined_name(node: ast.stmt) -> str | None:
+    """Return the name introduced by a definition or assignment."""
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
         return node.name
 
@@ -145,9 +150,8 @@ def get_scope_statements(scope: Scope) -> Iterator[ast.stmt]:
     # Everything the scope executes, stopping where a nested scope begins. An `if` or a `try` is not a
     # scope -- a name bound inside one is bound out here -- but a `def` and a `class` are.
     #
-    # `Scope` rather than `ast.AST`: reaching `body` by `getattr` with an empty default made a node this
-    # function did not understand yield nothing, and nothing is indistinguishable from a clean scope
-    # (the gate policy -- when a check cannot be performed, refuse). The union is a type error at the call site.
+    # Restrict the input to scopes with a known body; unsupported nodes must not read as clean scopes.
+    """Yield statements executed in a scope without entering nested definitions."""
     pending: Final[list[ast.stmt]] = list(scope.body)
     node: ast.stmt
     while len(pending) > 0:
@@ -163,6 +167,7 @@ def get_nested_statements(node: ast.stmt) -> list[ast.stmt]:
     # `ast.ExceptHandler` and `ast.match_case` are not `ast.stmt` -- they descend from `ast.excepthandler`
     # and `ast.AST` -- so filtering children on `stmt` silently drops every statement under an `except`
     # or a `case`. They are reached through their own `body` instead.
+    """Return child statements, including exception and match-case bodies."""
     statements: Final[list[ast.stmt]] = []
     child: ast.AST
     for child in ast.iter_child_nodes(node):
@@ -176,6 +181,7 @@ def get_nested_statements(node: ast.stmt) -> list[ast.stmt]:
 
 
 def get_module_level_names(tree: ast.Module) -> Iterator[str]:
+    """Yield names bound at module scope, including conditional blocks."""
     pending: Final[list[ast.stmt]] = list(tree.body)
     node: ast.stmt
     while len(pending) > 0:
@@ -191,6 +197,7 @@ def get_module_level_names(tree: ast.Module) -> Iterator[str]:
 def get_import_time_expressions(node: ast.stmt, *, is_annotation_forced: bool = False) -> list[ast.expr]:
     # What actually runs when this statement executes. A function body does not, so a helper may be
     # defined below its caller; a constant's value does, so a constant built from a class follows it.
+    """Return expressions evaluated while defining a statement."""
     if isinstance(node, ast.AnnAssign):
         expressions: list[ast.expr] = [] if node.value is None else [node.value]
         # `@dataclasses.dataclass` reads `__annotations__`, which evaluates the field annotations.
@@ -232,6 +239,7 @@ def get_import_time_expressions(node: ast.stmt, *, is_annotation_forced: bool = 
 
 
 def get_referenced_names(expressions: Iterable[ast.expr]) -> set[str]:
+    """Collect names referenced by a sequence of expressions."""
     return {
         referenced.id
         for expression in expressions
@@ -246,10 +254,11 @@ def get_canonical_order(
     # Lowest rank first, original position as the tie-break, but never before something it needs. This is
     # the ordering rule's order wherever Python permits it, and only ever deviates where it does not.
     #
-    # Positions rather than names, because a name can appear twice -- a `@property` and its `@x.setter`
-    # bind one -- and a set of placed *names* can never select the second of a pair. The loop then ran
-    # dry with the answer half-built, and returning the input verbatim read as "already canonical",
-    # switching the gate off for the whole scope.
+    # Track positions because a property and its setter bind the same name but both must be placed.
+    """Sort by rank without violating dependencies or losing repeated names.
+
+    Equal ranks retain input order; dependency cycles raise ``ValueError``.
+    """
     declared: Final[AbstractSet[str]] = set(names)
     canonical: Final[list[str]] = []
     placed: Final[set[int]] = set()
@@ -277,6 +286,7 @@ def get_canonical_order(
 
 
 def get_visibility(name: str) -> Visibility:
+    """Classify a name as magic, public, protected, or private."""
     if name.startswith("__") and name.endswith("__"):
         return Visibility.MAGIC
 
@@ -292,14 +302,17 @@ def get_visibility(name: str) -> Visibility:
 def get_decorator_names(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> frozenset[str]:
     # The trailing attribute only: `@dataclasses.dataclass(...)` and `@dataclass` name the same decorator
     # to every rule that asks about one, and the call arguments never carry its identity.
+    """Return each decorator's final name without its call arguments."""
     return frozenset(_get_decorator_name(decorator) for decorator in node.decorator_list)
 
 
 def get_parameters(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.arg]:
+    """Return positional-only, positional, and keyword-only parameters in order."""
     return [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
 
 
 def get_functions(tree: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Yield sync and async functions at any nesting depth."""
     node: ast.AST
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -307,6 +320,7 @@ def get_functions(tree: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunction
 
 
 def is_protocol(node: ast.ClassDef) -> bool:
+    """Report whether a class directly inherits from ``Protocol``."""
     base: ast.expr
     for base in node.bases:
         if isinstance(base, ast.Name) and base.id == "Protocol":
@@ -319,6 +333,7 @@ def is_protocol(node: ast.ClassDef) -> bool:
 
 
 def get_comments(source: str) -> list[Comment]:
+    """Return comments with their location and pragma status."""
     lines: Final[Sequence[str]] = source.splitlines()
     comments: Final[list[Comment]] = []
     token: tokenize.TokenInfo
@@ -342,6 +357,7 @@ def get_logical_lines(source: str) -> list[LogicalLine]:
     # Where each statement or clause header starts. A continuation inside brackets emits `NL` rather than
     # `NEWLINE`, so a wrapped call stays one logical line, while `else` and `except` head their own --
     # which is what lets the spacing rule see the dedent into them.
+    """Return starts of statements and clause headers, ignoring continuations."""
     logical: Final[list[LogicalLine]] = []
     is_line_pending: bool = True
     token: tokenize.TokenInfo
@@ -359,6 +375,7 @@ def get_logical_lines(source: str) -> list[LogicalLine]:
 
 
 def _get_statement_names(node: ast.stmt) -> Iterator[str]:
+    """Yield names bound by a statement without entering nested scopes."""
     if isinstance(node, ast.Import | ast.ImportFrom):
         yield from (alias.asname if alias.asname is not None else alias.name.partition(".")[0] for alias in node.names)
 
@@ -399,6 +416,7 @@ def _get_pattern_names(node: ast.Match) -> Iterator[str]:
 
 
 def _refuse_cycle(names: Sequence[str], *, placed: AbstractSet[int]) -> Never:
+    """Raise when dependency ordering has no valid result."""
     remaining: Final[list[str]] = [names[index] for index in range(len(names)) if index not in placed]
     message: Final[str] = f"Definitions {remaining} require each other, so no order satisfies them."
     raise ValueError(message)
@@ -436,6 +454,8 @@ def _get_defaults(arguments: ast.arguments) -> list[ast.expr]:
 # pyright does not see that `StrEnum` initializes `_value_` for its members, so a `@final` StrEnum reads
 # to it as a final class with an uninitialized inherited attribute.
 class Visibility(StrEnum):  # pyright: ignore[reportUninitializedInstanceVariable]
+    """Name visibility categories used by convention checks."""
+
     MAGIC = "magic"
     PUBLIC = "public"
     PROTECTED = "protected"
@@ -445,6 +465,8 @@ class Visibility(StrEnum):  # pyright: ignore[reportUninitializedInstanceVariabl
 @final
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
 class Comment:
+    """Store a comment's location, text, and placement flags."""
+
     row: int
     text: str
     is_own_line: bool
@@ -454,5 +476,7 @@ class Comment:
 @final
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
 class LogicalLine:
+    """Store a logical statement's starting row and column."""
+
     row: int
     column: int

@@ -13,6 +13,7 @@ AGENTS.md                    # agent instructions; points at the coding guide
 .pre-commit-config.yaml      # source checks and Conventional Commit validation
 docs/coding.md               # house style and conventions beyond standard tooling
 docs/tracing.md              # Logfire tracing, decorators, and context propagation
+docs/database.md             # PostgreSQL and Alembic template
 .zed/settings.json           # Zed: ruff, pyright and pylsp from the project venv, format on save
 Makefile                     # format, lint, test, install-hooks, bump-deps, bump, version
 pyproject.toml               # ruff, mypy, pyright (strict) and pytest configuration
@@ -20,6 +21,8 @@ scripts/bump_deps.py         # raises the `>=` floors in pyproject.toml to the i
 src/
   devkit/                    # the package
     tracing/                 # Logfire tracing helpers
+    types/                   # shared Pydantic entity and UTC datetime types
+    db/                      # async PostgreSQL template
   devkit_tests/
     conventions/             # the convention gates: parse every module and fail on a broken rule
 ```
@@ -30,7 +33,7 @@ src/
 uv sync                      # create .venv with the lint and test groups
 make format                  # ruff --fix and ruff format
 make lint                    # ruff check, ruff format --check, mypy, pyright
-make test                    # pytest, which includes the convention gates
+make test                    # pytest with readable TestDox output and convention gates
 make install-hooks           # install pre-commit and commit-msg hooks
 make bump-deps               # upgrade every dependency and rewrite the floors in pyproject.toml
 make bump VERSION=x.y.z      # set the project version and refresh the lockfile
@@ -60,6 +63,11 @@ touched, so review the result with `git status`, point `origin` at your own repo
 
 The package includes Logfire helpers for logs, spans, sync and async decorators, and portable trace contexts.
 See [docs/tracing.md](docs/tracing.md) for configuration, examples, and lifecycle behavior.
+
+## Database
+
+The [PostgreSQL template](docs/database.md) provides typed settings, an async SQLAlchemy session boundary,
+a declarative base, and Alembic migrations configured in `pyproject.toml`.
 
 ## The convention gates
 

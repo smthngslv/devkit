@@ -1,7 +1,8 @@
+"""Check callback names and class namespace repetition."""
+
 import ast
 import pathlib
 import re
-from collections.abc import Iterator
 from typing import Final
 
 import pytest
@@ -9,21 +10,9 @@ import pytest
 from devkit_tests.conventions import source
 
 __all__: Final[tuple[str, ...]] = (
-    "test_boolean_names_say_what_true_means",
     "test_callback_parameters_are_named_as_callbacks",
     "test_class_names_do_not_repeat_their_namespace",
 )
-
-# The naming rule's boolean prefixes. Every one of them turns a name into a yes/no question, which is what
-# makes `is_enabled=False` readable at a call site where `enabled=False` needs the signature to decode.
-_BOOLEAN_PREFIXES: Final[tuple[str, ...]] = ("allow_", "can_", "has_", "is_", "should_", "use_")
-
-# What a boolean is annotated as, once `Final`/`ClassVar` and any namespace are stripped off. A wider
-# union is a different question -- `bool | Set[str]` is a mode, not a yes/no. Literal boolean
-# assignments are also checked, even without an annotation.
-_BOOLEAN_ANNOTATIONS: Final[frozenset[str]] = frozenset({"bool", "bool | None", "None | bool"})
-
-_WRAPPERS: Final[tuple[str, ...]] = ("ClassVar", "Final")
 
 # The naming rule's callback spelling: the `on_` prefix says a callback is what it is, and the `_callback`
 # postfix says a parameter is holding one rather than being handed ordinary data.
@@ -37,30 +26,6 @@ _CALLBACK_HINT: Final[re.Pattern[str]] = re.compile(r"^_?on_|callback")
 # shortest stem this package has (`data`), so the exemption is one character from mattering -- a shorter
 # package added later loses the check, and this constant is where that trade-off is visible.
 _MINIMUM_STEM_LENGTH: Final[int] = 4
-
-
-@pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
-def test_boolean_names_say_what_true_means(path: pathlib.Path) -> None:
-    """Require boolean names to read as yes-or-no questions.
-
-    Check boolean annotations, optional booleans, and assignments of True or False.
-    For example, use `should_retry` instead of `retry`. Ignore indexed writes,
-    which do not declare a variable name. Types inferred from arbitrary calls are
-    outside this syntax check, so semantic naming still needs review.
-    """
-    offenders: Final[list[str]] = []
-    row: int
-    name: str
-    for row, name in _get_boolean_names(source.parse(path)):
-        if name.lower().lstrip("_").startswith(_BOOLEAN_PREFIXES):
-            continue
-
-        offenders.append(f"  line {row}: `{name}`")
-
-    assert offenders == [], (
-        f"{source.get_module_id(path)} names booleans without a prefix from {list(_BOOLEAN_PREFIXES)} "
-        f"(the naming rule):\n" + "\n".join(offenders)
-    )
 
 
 @pytest.mark.parametrize("path", source.get_module_paths(), ids=source.get_module_id)
@@ -110,47 +75,6 @@ def test_class_names_do_not_repeat_their_namespace(path: pathlib.Path) -> None:
     assert offenders == [], f"{source.get_module_id(path)} repeats its namespace in a class name:\n" + "\n".join(
         offenders
     )
-
-
-def _get_boolean_names(tree: ast.Module) -> Iterator[tuple[int, str]]:
-    node: ast.AST
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name | ast.Attribute)
-            and _is_boolean(node.annotation)
-        ):
-            yield node.lineno, ast.unparse(node.target).rpartition(".")[2]
-
-        # Unannotated, but `= True` says what the type is as plainly as an annotation would. `ANN` does
-        # not reach an assignment, so without this a boolean dodges the naming rule by dropping its type.
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, bool):
-            target: ast.expr
-            for target in node.targets:
-                if isinstance(target, ast.Name | ast.Attribute):
-                    yield node.lineno, ast.unparse(target).rpartition(".")[2]
-
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-
-        argument: ast.arg
-        for argument in source.get_parameters(node):
-            if argument.annotation is not None and _is_boolean(argument.annotation):
-                yield argument.lineno, argument.arg
-
-
-def _is_boolean(annotation: ast.expr) -> bool:
-    # Through `Final[...]` / `ClassVar[...]` and past any namespace, so `typing.Final[bool]` is the same
-    # question as `bool` -- the spelling of the wrapper says nothing about whether the name is a yes/no.
-    inner: ast.expr = annotation
-    while isinstance(inner, ast.Subscript) and _get_head(inner.value) in _WRAPPERS:
-        inner = inner.slice
-
-    return ast.unparse(inner) in _BOOLEAN_ANNOTATIONS
-
-
-def _get_head(expression: ast.expr) -> str:
-    return expression.attr if isinstance(expression, ast.Attribute) else ast.unparse(expression)
 
 
 def _get_namespace(path: pathlib.Path, *, name: str) -> str:

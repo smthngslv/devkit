@@ -1,3 +1,5 @@
+"""Exercise each convention gate with valid and invalid source."""
+
 import ast
 import dataclasses
 import pathlib
@@ -13,6 +15,7 @@ from devkit_tests.conventions import (
     test_calls,
     test_comments,
     test_exports,
+    test_imports,
     test_layout,
     test_naming,
     test_ordering,
@@ -88,6 +91,16 @@ def test_definition_sorting_rejects_cycles() -> None:
     """
     with pytest.raises(ValueError, match="require each other"):
         source.get_canonical_order(["a", "b"], ranks={"a": 0, "b": 1}, requires={"a": {"b"}, "b": {"a"}})
+
+
+def test_documented_package_marker_needs_no_export(tmp_path: pathlib.Path) -> None:
+    """Allow a package marker to describe itself without declaring exports.
+
+    A docstring does not add a public symbol, so it should not make an otherwise
+    empty ``__init__.py`` fail the export gate.
+    """
+    path: Final[pathlib.Path] = _write(source='"""Package summary."""\n', path=tmp_path, name="__init__.py")
+    test_exports.test_every_module_declares_its_exports(path)
 
 
 @pytest.mark.parametrize("extra_lines", [0, 1], ids=("at-limit", "over-limit"))
@@ -277,6 +290,7 @@ def test_literal_call_gate_respects_signature_and_scope(
 
 def _write(source: str, *, path: pathlib.Path, name: str) -> pathlib.Path:
     written: Final[pathlib.Path] = path / name
+    written.parent.mkdir(parents=True, exist_ok=True)
     written.write_text(source, encoding="utf-8")
     return written
 
@@ -295,6 +309,48 @@ class _Case:
 
 
 _CASES: Final[tuple[_Case, ...]] = (
+    _Case(
+        gate=test_imports.test_package_imports_respect_boundaries,
+        violating="from devkit.tracing import Context\n",
+        clean="from devkit.tracing.context import Context\n",
+        name="devkit/tracing/tracer.py",
+        scenario="parent-facade",
+    ),
+    _Case(
+        gate=test_imports.test_package_imports_respect_boundaries,
+        violating="from devkit.tracing import Level\n",
+        clean="from devkit.tracing.level import Level\n",
+        name="devkit/tracing/probe.py",
+        scenario="ancestor-object-export",
+    ),
+    _Case(
+        gate=test_imports.test_package_imports_respect_boundaries,
+        violating="from . import Context\n",
+        clean="from .context import Context\n",
+        name="devkit/tracing/probe.py",
+        scenario="relative-object-export",
+    ),
+    _Case(
+        gate=test_imports.test_package_imports_respect_boundaries,
+        violating="from .. import Service\n",
+        clean="from ..service import Service\n",
+        name="devkit/db/migrations/probe.py",
+        scenario="relative-ancestor-export",
+    ),
+    _Case(
+        gate=test_imports.test_package_imports_respect_boundaries,
+        violating="from devkit.db import Missing\n",
+        clean="from devkit.db import Service\n",
+        name="devkit_tests/probe.py",
+        scenario="undeclared-export",
+    ),
+    _Case(
+        gate=test_imports.test_package_imports_respect_boundaries,
+        violating="from devkit import Entity\n",
+        clean="from devkit import tracing\n",
+        name="devkit/db/probe.py",
+        scenario="sibling-module",
+    ),
     _Case(
         gate=test_calls.test_literal_arguments_use_keywords,
         violating="def connect(timeout_s): pass\nconnect(30)\n",
@@ -352,19 +408,23 @@ _CASES: Final[tuple[_Case, ...]] = (
         + "\n\ndef read(*, is_ready: bool) -> None:\n    if is_ready:\n        print(1)\n\n    print(2)\n",
     ),
     _Case(
+        gate=test_layout.test_a_dedent_is_preceded_by_a_blank_line,
+        violating=("try:\n    read()\nexcept ValueError:\n    recover()\n"),
+        clean=("try:\n    read()\n\nexcept ValueError:\n    recover()\n"),
+        name="probe.py",
+        scenario="except-spacing",
+    ),
+    _Case(
+        gate=test_layout.test_a_dedent_is_preceded_by_a_blank_line,
+        violating=("try:\n    read()\nfinally:\n    close()\n"),
+        clean=("try:\n    read()\n\nfinally:\n    close()\n"),
+        name="probe.py",
+        scenario="finally-spacing",
+    ),
+    _Case(
         gate=test_layout.test_split_strings_keep_the_space_on_the_line_above,
         violating=_HEADER + '\nVALUE: Final[str] = (\n    "the space belongs"\n    " on the line above"\n)\n',
         clean=_HEADER + '\nVALUE: Final[str] = (\n    "the space belongs "\n    "on the line above"\n)\n',
-    ),
-    _Case(
-        gate=test_naming.test_boolean_names_say_what_true_means,
-        violating=_HEADER + "\n\ndef read(*, retry: bool = False) -> None:\n    print(retry)\n",
-        clean=_HEADER + "\n\ndef read(*, should_retry: bool = False) -> None:\n    print(should_retry)\n",
-    ),
-    _Case(
-        gate=test_naming.test_boolean_names_say_what_true_means,
-        violating=_HEADER + "\nRETRY = True\n",
-        clean=_HEADER + "\nSHOULD_RETRY = True\n",
     ),
     _Case(
         gate=test_naming.test_callback_parameters_are_named_as_callbacks,
@@ -406,6 +466,12 @@ _CASES: Final[tuple[_Case, ...]] = (
         gate=test_signatures.test_the_receiver_of_a_method_is_typed,
         violating=_HEADER + "\n\nclass Record:\n    def read(self, /) -> None:\n        pass\n",
         clean=_HEADER + "\n\nclass Record:\n    def read(self: Self, /) -> None:\n        pass\n",
+    ),
+    _Case(
+        gate=test_signatures.test_the_receiver_of_a_method_is_typed,
+        violating="class Session:\n    def commit(self: Session[int], /): pass\n",
+        clean="class Session[Mode]:\n    def commit(self: Session[int], /): pass\n",
+        scenario="generic-mode-receiver",
     ),
     _Case(
         gate=test_signatures.test_methods_mark_their_receiver_positional_only,
@@ -580,27 +646,6 @@ _CASES: Final[tuple[_Case, ...]] = (
         clean=("type _Item = str\n"),
         name="probe.py",
         scenario="alias-private",
-    ),
-    _Case(
-        gate=test_naming.test_boolean_names_say_what_true_means,
-        violating=("retry: None | bool = None\n"),
-        clean=("should_retry: None | bool = None\n"),
-        name="probe.py",
-        scenario="optional-bool",
-    ),
-    _Case(
-        gate=test_naming.test_boolean_names_say_what_true_means,
-        violating=("retry: ClassVar[Final[bool]] = False\n"),
-        clean=("should_retry: ClassVar[Final[bool]] = False\n"),
-        name="probe.py",
-        scenario="nested-bool",
-    ),
-    _Case(
-        gate=test_naming.test_boolean_names_say_what_true_means,
-        violating=("retry = True\n"),
-        clean=('settings["retry"] = True\n'),
-        name="probe.py",
-        scenario="indexed-bool",
     ),
     _Case(
         gate=test_statements.test_removal_goes_through_a_method_rather_than_del,

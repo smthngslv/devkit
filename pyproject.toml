@@ -4,21 +4,43 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devkit"
-version = "0.2.1"
+version = "0.3.0"
 description = "Project template: coding rules, convention gates, and tooling configuration."
 readme = "./README.md"
 requires-python = "==3.14.*"
 dependencies = [
-    "logfire>=5.3.0",
-    "opentelemetry-api>=1.45.1",
-    "opentelemetry-sdk>=1.45.1",
+    # Main stack.
+    "pydantic>=2.14.2",
+    "pydantic-settings>=2.16.2",
+    # Tracing.
+    "logfire>=5.4.0",
+    "msgpack>=1.2.4",
+    "opentelemetry-api>=1.45.2",
+    "opentelemetry-sdk>=1.45.2",
+    # Database.
+    "alembic>=1.20.1",
+    "asyncpg>=0.32.0",
+    "sqlalchemy[asyncio]>=2.1.6",
 ]
+
+[project.optional-dependencies]
+
+[project.scripts]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["devkit", "devkit.*"]
+
+[tool.setuptools.package-data]
+"devkit.db.migrations" = ["*.mako"]
+
+[tool.setuptools.data-files]
 
 [dependency-groups]
 lint = [
     # Linters.
-    "mypy>=2.4.0",
-    "ruff>=0.17.2",
+    "mypy>=2.4.1",
+    "ruff>=0.17.3",
     "pyright>=1.1.414",
     "python-lsp-server>=1.15.0",
     "pylsp-mypy>=0.8.2",
@@ -26,18 +48,17 @@ lint = [
     "pre-commit>=4.7.0",
     # The `scripts/bump_deps.py` script.
     "tomlkit>=0.15.2",
+    # Tracing type stubs.
+    "msgpack-types>=0.8.0",
 ]
 test = [
-    "pytest>=9.1.1",
+    "pytest>=9.2.0",
+    "pytest-testdox>=3.1.0",
 ]
 
 [tool.uv]
 package = true
 default-groups = ["lint", "test"]
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["devkit", "devkit.*"]
 
 [tool.ruff]
 # https://docs.astral.sh/ruff/settings/#include.
@@ -66,21 +87,8 @@ skip-magic-trailing-comma = true
 dummy-variable-rgx = "^_+$"
 # https://docs.astral.sh/ruff/settings/#lint_ignore.
 ignore = [
-    # Unnessasary docs.
-    # https://docs.astral.sh/ruff/rules/undocumented-public-module/.
-    "D100",
-    # https://docs.astral.sh/ruff/rules/undocumented-public-class/.
-    "D101",
-    # https://docs.astral.sh/ruff/rules/undocumented-public-method/.
-    "D102",
-    # https://docs.astral.sh/ruff/rules/undocumented-public-function/.
-    "D103",
-    # https://docs.astral.sh/ruff/rules/undocumented-public-package/.
-    "D104",
     # https://docs.astral.sh/ruff/rules/undocumented-magic-method/.
     "D105",
-    # https://docs.astral.sh/ruff/rules/undocumented-public-nested-class/.
-    "D106",
     # https://docs.astral.sh/ruff/rules/undocumented-public-init/.
     "D107",
     # These are checked by formatter and ruff recomends to disable.
@@ -342,5 +350,8 @@ reportUnreachable = "error"
 [tool.pytest.ini_options]
 testpaths = ["./src/devkit_tests"]
 # `-ra` reports every non-passing outcome; without it skips and xfails are invisible.
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers --strict-config --force-testdox"
 xfail_strict = true
+
+[tool.alembic]
+script_location = "%(here)s/src/devkit/db/migrations"

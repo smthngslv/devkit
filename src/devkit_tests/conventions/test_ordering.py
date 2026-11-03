@@ -1,3 +1,5 @@
+"""Check definition order and constructor assignment order."""
+
 import ast
 import pathlib
 from collections.abc import Sequence, Set as AbstractSet
@@ -238,6 +240,7 @@ def _get_member_ranks(node: ast.ClassDef) -> dict[str, int]:
 
 
 def _get_member_requirements(node: ast.ClassDef) -> dict[str, set[str]]:
+    """Preserve the binding order required by member defaults and annotations."""
     # An edge in the direction the file already has it, because both directions are real: a member read by
     # an earlier member's decorator or default must precede it, and a member whose name shadows a module
     # global that an earlier member reads must follow it. At most one of the two holds for any pair, and
@@ -245,7 +248,7 @@ def _get_member_requirements(node: ast.ClassDef) -> dict[str, set[str]]:
     #
     # Annotations count here where they do not at module scope: a signature inside a class body resolves
     # its names against that body, so `Tracer.span` returning a `logfire.LogfireSpan` is what pins the
-    # `Tracer.logfire` property below it, whatever PEP 649 defers at runtime.
+    # `Tracer.logfire_instance` field below it, whatever PEP 649 defers at runtime.
     names: Final[list[str]] = _get_member_names(node)
     requirements: Final[dict[str, set[str]]] = {name: set() for name in names}
     member: ast.stmt

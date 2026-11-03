@@ -1,5 +1,7 @@
 #!/usr/bin/env -S uv run --active --with tomlkit python
 
+"""Upgrade dependency pins and synchronize the local environment."""
+
 import json
 import subprocess
 import sys

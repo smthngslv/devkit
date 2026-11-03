@@ -1,3 +1,5 @@
+"""Check type lookup and removal syntax."""
+
 import ast
 import pathlib
 from typing import Final
