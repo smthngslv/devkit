@@ -40,7 +40,7 @@ include = ["devkit", "devkit.*"]
 lint = [
     # Linters.
     "mypy>=2.4.1",
-    "ruff>=0.17.3",
+    "ruff>=0.17.4",
     "pyright>=1.1.414",
     "python-lsp-server>=1.15.0",
     "pylsp-mypy>=0.8.2",
